@@ -36,6 +36,9 @@ jobs:
       - name: Run E2E X5 invariants (nightly)
         run: npm run test:security:x5
 
+      - name: Run E2E ciphertext confidentiality (nightly)
+        run: npm run test:security:e2e-violations
+
 
       - name: Upload TAP log
         if: always()

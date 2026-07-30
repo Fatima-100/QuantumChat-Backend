@@ -94,3 +94,16 @@ test('[CRYPTO] member API listing must not embed plaintext', async () => {
   assert.equal(status, 200);
   assertNoPlaintextLeak(body, SECRET, 'member API listing');
 });
+
+test('[CRYPTO] FAIL GATE: private group rejects plaintext content body', async () => {
+  const privateGroup = await createGroup(ctx.base, users[0].token, {
+    name: `GroupPlainReject ${RUN}`,
+    memberIds: users.slice(1).map((u) => u.user.id),
+    visibility: 'private',
+  });
+  const { status, body } = await sendGroupMessage(ctx.base, users[0].token, privateGroup.id, null, {
+    content: SECRET,
+  });
+  assert.equal(status, 400);
+  assertNoPlaintextLeak(body, SECRET, 'private group plaintext reject');
+});

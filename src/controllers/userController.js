@@ -2,15 +2,15 @@ import User, { KEY_SET_SIZE } from '../models/User.js';
 import Group from '../models/Group.js';
 import Message from '../models/Message.js';
 import Attachment from '../models/Attachment.js';
+import FriendRequest from '../models/FriendRequest.js';
 import mongoose from 'mongoose';
-import fs from 'fs';
-import { resolveUploadPath, safeImageContentType } from '../middleware/upload.js';
+import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
 const PUBLIC_FIELDS =
-  'username displayName bio phone email publicKeys keyRotatedAt lastLoginAt blockedUsers avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+  'username displayName bio phone email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
 
 export async function areUsersBlocked(userAId, userBId) {
   const aId = toObjectId(userAId);
@@ -28,10 +28,12 @@ export async function areUsersBlocked(userAId, userBId) {
 
 export async function listUsers(req, res) {
   const blockedIds = (req.user.blockedUsers || []).map((id) => id);
+  const friendIds = (req.user.friends || []).map((id) => String(id));
   const users = await User.find({
     _id: { $nin: [req.user._id, ...blockedIds] },
   }).select(PUBLIC_FIELDS);
-  res.json({ success: true, data: users.map((u) => u.toPublicJSON()) });
+  const visible = users.filter((u) => u.isSystemUser || friendIds.includes(String(u._id)));
+  res.json({ success: true, data: visible.map((u) => u.toPublicJSON()) });
 }
 
 export async function getMe(req, res) {
@@ -51,14 +53,15 @@ export async function getMyPublicKeys(req, res) {
 }
 
 export async function getUser(req, res) {
-  const user = await User.findById(req.params.id).select(PUBLIC_FIELDS);
+  const id = toObjectId(req.params.id);
+  if (!id) return res.status(400).json({ success: false, error: 'Invalid user id' });
+  const user = await User.findById(id).select(PUBLIC_FIELDS);
   if (!user) return res.status(404).json({ success: false, error: 'User not found' });
   if (await areUsersBlocked(req.user._id, user._id)) {
     return res.status(403).json({ success: false, error: 'User is blocked' });
   }
   res.json({ success: true, data: user.toPublicJSON() });
 }
-
 export async function updateProfile(req, res) {
   try {
     const { displayName, bio, phone, username, privacy } = req.body || {};
@@ -129,8 +132,8 @@ export async function listBlockedUsers(req, res) {
 }
 
 export async function blockUser(req, res) {
-  const { id } = req.params;
-  if (!mongoose.isValidObjectId(id)) {
+  const id = toObjectId(req.params.id);
+  if (!id) {
     return res.status(400).json({ success: false, error: 'Invalid user id' });
   }
   if (String(id) === String(req.user._id)) {
@@ -149,8 +152,8 @@ export async function blockUser(req, res) {
 }
 
 export async function unblockUser(req, res) {
-  const { id } = req.params;
-  if (!mongoose.isValidObjectId(id)) {
+  const id = toObjectId(req.params.id);
+  if (!id) {
     return res.status(400).json({ success: false, error: 'Invalid user id' });
   }
 
@@ -176,25 +179,38 @@ export async function updatePublicKeys(req, res) {
 
 export async function uploadAvatar(req, res) {
   try {
-    if (!req.file) {
+    if (!req.file?.buffer) {
       return res.status(400).json({ success: false, error: 'Image file is required' });
     }
 
-    const relativePath = `avatars/${req.file.filename}`;
+    const storage = getStorage();
+    const ext = (() => {
+      const raw = String(req.file.originalname || '');
+      const i = raw.lastIndexOf('.');
+      return i >= 0 ? raw.slice(i).toLowerCase() : '.jpg';
+    })();
+    const objectName = newObjectName('avatars', ext === '.jpeg' ? '.jpg' : ext);
+    const stored = await storage.put(
+      req.file.buffer,
+      objectName,
+      safeImageContentType(req.file.mimetype),
+      String(req.user._id)
+    );
+
     if (req.user.avatarPath) {
       try {
-        fs.unlink(resolveUploadPath(req.user.avatarPath), () => {});
+        await storage.delete(req.user.avatarPath);
       } catch {
         // ignore
       }
     }
 
-    req.user.avatarPath = relativePath;
+    req.user.avatarPath = stored.key;
+    req.user.avatarStorageProvider = stored.provider;
     req.user.avatarMimeType = safeImageContentType(req.file.mimetype);
     await req.user.save();
     res.json({ success: true, data: req.user.toSelfJSON() });
   } catch (err) {
-    if (req.file?.path) fs.unlink(req.file.path, () => {});
     res.status(500).json({ success: false, error: err.message });
   }
 }
@@ -203,12 +219,13 @@ export async function deleteAvatar(req, res) {
   try {
     if (req.user.avatarPath) {
       try {
-        fs.unlink(resolveUploadPath(req.user.avatarPath), () => {});
+        await getStorage().delete(req.user.avatarPath);
       } catch {
         // ignore
       }
     }
     req.user.avatarPath = null;
+    req.user.avatarStorageProvider = null;
     req.user.avatarMimeType = null;
     await req.user.save();
     res.json({ success: true, data: req.user.toSelfJSON() });
@@ -219,25 +236,24 @@ export async function deleteAvatar(req, res) {
 
 export async function getAvatar(req, res) {
   try {
-    const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) {
+    const id = toObjectId(req.params.id);
+    if (!id) {
       return res.status(400).json({ success: false, error: 'Invalid user id' });
     }
     const user = await User.findById(id).select('avatarPath avatarMimeType');
     if (!user?.avatarPath) {
       return res.status(404).json({ success: false, error: 'No avatar' });
     }
-    const filePath = resolveUploadPath(user.avatarPath);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, error: 'Avatar file missing' });
-    }
+    const bytes = await getStorage().read(user.avatarPath);
     res.setHeader('Content-Type', safeImageContentType(user.avatarMimeType));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Disposition', 'inline');
     res.setHeader('Cache-Control', 'private, max-age=3600');
-    fs.createReadStream(filePath).pipe(res);
+    res.send(bytes);
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    if (!res.headersSent) {
+      res.status(404).json({ success: false, error: 'Avatar file missing' });
+    }
   }
 }
 
@@ -286,7 +302,6 @@ export async function deleteAccount(req, res) {
 
     const userId = user._id;
 
-    // Leave groups / remove membership
     const groups = await Group.find({ members: userId });
     for (const group of groups) {
       group.members = group.members.filter((m) => String(m) !== String(userId));
@@ -306,12 +321,13 @@ export async function deleteAccount(req, res) {
     }
 
     await Message.deleteMany({ $or: [{ from: userId }, { to: userId }] });
-    // Remove user from others' block lists
     await User.updateMany({ blockedUsers: userId }, { $pull: { blockedUsers: userId } });
+    await User.updateMany({ friends: userId }, { $pull: { friends: userId } });
+    await FriendRequest.deleteMany({ $or: [{ from: userId }, { to: userId }] });
 
     if (user.avatarPath) {
       try {
-        fs.unlink(resolveUploadPath(user.avatarPath), () => {});
+        await getStorage().delete(user.avatarPath);
       } catch {
         // ignore
       }
@@ -319,6 +335,249 @@ export async function deleteAccount(req, res) {
 
     await user.deleteOne();
     res.json({ success: true, data: { deleted: true } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/* ================================================================
+   FRIEND REQUESTS / FRIENDS
+   ================================================================ */
+
+export async function discoverUsers(req, res) {
+  try {
+    const blockedIds = (req.user.blockedUsers || []).map((id) => String(id));
+    const friendIds = (req.user.friends || []).map((id) => String(id));
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+    const filter = {
+      _id: { $ne: req.user._id },
+      isSystemUser: { $ne: true },
+    };
+    if (q) {
+      filter.$or = [
+        { username: { $regex: q, $options: 'i' } },
+        { displayName: { $regex: q, $options: 'i' } },
+      ];
+    }
+
+    const users = await User.find(filter).select(PUBLIC_FIELDS).limit(100);
+    const candidates = users.filter(
+      (u) => !blockedIds.includes(String(u._id)) && !friendIds.includes(String(u._id))
+    );
+    const candidateIds = candidates.map((u) => u._id);
+
+    const requests = await FriendRequest.find({
+      status: 'pending',
+      $or: [
+        { from: req.user._id, to: { $in: candidateIds } },
+        { to: req.user._id, from: { $in: candidateIds } },
+      ],
+    });
+
+    const statusByUserId = new Map();
+    for (const r of requests) {
+      if (String(r.from) === String(req.user._id)) {
+        statusByUserId.set(String(r.to), { status: 'pending_sent', requestId: r._id });
+      } else {
+        statusByUserId.set(String(r.from), { status: 'pending_received', requestId: r._id });
+      }
+    }
+
+    const data = candidates.map((u) => {
+      const info = statusByUserId.get(String(u._id));
+      return {
+        ...u.toPublicJSON(),
+        requestStatus: info?.status || 'none',
+        requestId: info?.requestId || null,
+      };
+    });
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+async function acceptFriendRequestRecord(request, req) {
+  request.status = 'accepted';
+  await request.save();
+
+  await Promise.all([
+    User.updateOne({ _id: request.from }, { $addToSet: { friends: request.to } }),
+    User.updateOne({ _id: request.to }, { $addToSet: { friends: request.from } }),
+  ]);
+
+  const [fromUser, toUser] = await Promise.all([
+    User.findById(request.from).select(PUBLIC_FIELDS),
+    User.findById(request.to).select(PUBLIC_FIELDS),
+  ]);
+
+  const io = req.app.get('io');
+  io?.to(String(request.from)).emit('friend:request:accepted', {
+    id: request._id,
+    friend: toUser.toPublicJSON(),
+  });
+  io?.to(String(request.to)).emit('friend:request:accepted', {
+    id: request._id,
+    friend: fromUser.toPublicJSON(),
+  });
+}
+
+export async function sendFriendRequest(req, res) {
+  try {
+    const { to } = req.body || {};
+    const targetId = toObjectId(to);
+    if (!targetId || targetId.equals(req.user._id)) {
+      return res.status(400).json({ success: false, error: 'Invalid user id' });
+    }
+
+    const target = await User.findById(targetId).select('_id isSystemUser');
+    if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+    if (target.isSystemUser) {
+      return res.status(400).json({ success: false, error: 'Cannot send a friend request to this account' });
+    }
+    if (await areUsersBlocked(req.user._id, target._id)) {
+      return res.status(403).json({ success: false, error: 'Not allowed' });
+    }
+
+    const alreadyFriends = (req.user.friends || []).some((id) => String(id) === String(target._id));
+    if (alreadyFriends) {
+      return res.status(409).json({ success: false, error: 'Already friends' });
+    }
+
+    const existing = await FriendRequest.findOne({
+      status: 'pending',
+      $or: [
+        { from: req.user._id, to: target._id },
+        { from: target._id, to: req.user._id },
+      ],
+    });
+
+    if (existing) {
+      if (String(existing.from) === String(target._id)) {
+        await acceptFriendRequestRecord(existing, req);
+        return res.json({ success: true, data: { id: existing._id, status: 'accepted' } });
+      }
+      return res.status(409).json({ success: false, error: 'Friend request already sent' });
+    }
+
+    const request = await FriendRequest.create({ from: req.user._id, to: target._id, status: 'pending' });
+
+    const io = req.app.get('io');
+    io?.to(String(target._id)).emit('friend:request:new', {
+      id: request._id,
+      from: req.user.toPublicJSON(),
+    });
+
+    res.status(201).json({ success: true, data: { id: request._id, status: 'pending' } });
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ success: false, error: 'Friend request already exists' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+export async function listFriendRequests(req, res) {
+  try {
+    const [incoming, outgoing] = await Promise.all([
+      FriendRequest.find({ to: req.user._id, status: 'pending' }).populate('from', PUBLIC_FIELDS),
+      FriendRequest.find({ from: req.user._id, status: 'pending' }).populate('to', PUBLIC_FIELDS),
+    ]);
+    res.json({
+      success: true,
+      data: {
+        incoming: incoming.map((r) => ({ id: r._id, user: r.from.toPublicJSON(), createdAt: r.createdAt })),
+        outgoing: outgoing.map((r) => ({ id: r._id, user: r.to.toPublicJSON(), createdAt: r.createdAt })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function acceptFriendRequest(req, res) {
+  try {
+    const requestId = toObjectId(req.params.id);
+    if (!requestId) {
+      return res.status(400).json({ success: false, error: 'Invalid request id' });
+    }
+    const request = await FriendRequest.findById(requestId);
+    if (!request || request.status !== 'pending') {
+      return res.status(404).json({ success: false, error: 'Friend request not found' });
+    }
+    if (String(request.to) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized to accept this request' });
+    }
+    await acceptFriendRequestRecord(request, req);
+    const me = await User.findById(req.user._id);
+    res.json({ success: true, data: { id: request._id, status: 'accepted', me: me.toSelfJSON() } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+export async function declineFriendRequest(req, res) {
+  try {
+    const requestId = toObjectId(req.params.id);
+    if (!requestId) {
+      return res.status(400).json({ success: false, error: 'Invalid request id' });
+    }
+    const request = await FriendRequest.findById(requestId);
+    if (!request || request.status !== 'pending') {
+      return res.status(404).json({ success: false, error: 'Friend request not found' });
+    }
+    if (String(request.to) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized to decline this request' });
+    }
+    request.status = 'declined';
+    await request.save();
+    res.json({ success: true, data: { id: request._id, status: 'declined' } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function cancelFriendRequest(req, res) {
+  try {
+    const requestId = toObjectId(req.params.id);
+    if (!requestId) {
+      return res.status(400).json({ success: false, error: 'Invalid request id' });
+    }
+    const request = await FriendRequest.findById(requestId);
+    if (!request || request.status !== 'pending') {
+      return res.status(404).json({ success: false, error: 'Friend request not found' });
+    }
+    if (String(request.from) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized to cancel this request' });
+    }
+    await request.deleteOne();
+    res.json({ success: true, data: { id: requestId, cancelled: true } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function removeFriend(req, res) {
+  try {
+    const friendId = toObjectId(req.params.id);
+    if (!friendId || friendId.equals(req.user._id)) {
+      return res.status(400).json({ success: false, error: 'Invalid user id' });
+    }
+
+    const isFriend = (req.user.friends || []).some((f) => String(f) === String(friendId));
+    if (!isFriend) {
+      return res.status(404).json({ success: false, error: 'Not currently friends with this user' });
+    }
+
+    await Promise.all([
+      User.updateOne({ _id: req.user._id }, { $pull: { friends: friendId } }),
+      User.updateOne({ _id: friendId }, { $pull: { friends: req.user._id } }),
+    ]);
+
+    const io = req.app.get('io');
+    io?.to(String(friendId)).emit('friend:removed', { by: String(req.user._id) });
+    const me = await User.findById(req.user._id);
+    res.json({ success: true, data: { id: friendId, removed: true, me: me.toSelfJSON() } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

@@ -1,8 +1,12 @@
 name: E2E Ciphertext Confidentiality
 
+# Hard gate: sealed DMs/groups stay opaque; plaintext violation attempts are rejected.
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   e2e-ciphertext:
@@ -27,5 +31,5 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run E2E ciphertext confidentiality suite
-        run: npm run test:e2e-crypto
+      - name: Run E2E ciphertext + encryption violation suites
+        run: npm run test:security:e2e-violations
