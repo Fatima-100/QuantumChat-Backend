@@ -19,14 +19,14 @@ jobs:
       - name: Forbid plaintext WebRTC signaling emits
         run: |
           set -euo pipefail
-          # Call socket emits must carry sealed envelopes, not raw SDP/ICE.
+          # Call/meeting socket emits must carry sealed envelopes, not raw SDP/ICE.
           if grep -RInE --include='*.{js,jsx,ts,tsx}' \
-            "emit\(['\"]call:(offer|answer|ice|invite|accept|reject|hangup)['\"].*\b(sdp|candidate)\b" \
+            "emit\(['\"](call|meeting):(offer|answer|ice|invite|accept|reject|hangup|join|leave|end)['\"].*\b(sdp|candidate)\b" \
             src; then
-            echo "::error::Raw SDP/ICE fields must not appear on call:* emits — use X5 envelopes."
+            echo "::error::Raw SDP/ICE fields must not appear on call:*/meeting:* emits — use X5 envelopes."
             exit 1
           fi
-          echo "OK: no plaintext call signaling emits detected"
+          echo "OK: no plaintext call/meeting signaling emits detected"
 
       - name: Require sealed call envelope helpers
         run: |

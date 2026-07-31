@@ -11,6 +11,13 @@ const ALLOWED_EVENTS = new Set([
   'call:offer',
   'call:answer',
   'call:ice',
+  'meeting:invite',
+  'meeting:join',
+  'meeting:leave',
+  'meeting:end',
+  'meeting:offer',
+  'meeting:answer',
+  'meeting:ice',
 ]);
 
 function toClientSignal(signal) {

@@ -102,8 +102,13 @@ export function attachSocket(io) {
       socket.leave(`group:${String(groupId)}`);
     });
 
-    // WebRTC signaling — media is P2P; SDP/ICE must be X5 sealed envelopes only
-    function relaySealedCall(eventName, payload = {}) {
+    // WebRTC signaling — media is P2P; SDP/ICE must be X5 sealed envelopes only.
+    // Shared by 1:1 calls (call:*) and group meetings (meeting:*) — a meeting
+    // reuses the same `callId` wire field to carry its meetingId, so no
+    // separate identifier concept/schema is needed. The bot never holds
+    // roster/membership state, it just blindly relays sealed envelopes to a
+    // target user's room.
+    function relaySealedEnvelope(eventName, payload = {}) {
       const { to, callId, envelope } = payload;
       if (!to || !callId) return;
       if (payload.sdp != null || payload.candidate != null) return;
@@ -115,13 +120,21 @@ export function attachSocket(io) {
       });
     }
 
-    socket.on('call:invite', (payload = {}) => relaySealedCall('call:invite', payload));
-    socket.on('call:accept', (payload = {}) => relaySealedCall('call:accept', payload));
-    socket.on('call:reject', (payload = {}) => relaySealedCall('call:reject', payload));
-    socket.on('call:hangup', (payload = {}) => relaySealedCall('call:hangup', payload));
-    socket.on('call:offer', (payload = {}) => relaySealedCall('call:offer', payload));
-    socket.on('call:answer', (payload = {}) => relaySealedCall('call:answer', payload));
-    socket.on('call:ice', (payload = {}) => relaySealedCall('call:ice', payload));
+    socket.on('call:invite', (payload = {}) => relaySealedEnvelope('call:invite', payload));
+    socket.on('call:accept', (payload = {}) => relaySealedEnvelope('call:accept', payload));
+    socket.on('call:reject', (payload = {}) => relaySealedEnvelope('call:reject', payload));
+    socket.on('call:hangup', (payload = {}) => relaySealedEnvelope('call:hangup', payload));
+    socket.on('call:offer', (payload = {}) => relaySealedEnvelope('call:offer', payload));
+    socket.on('call:answer', (payload = {}) => relaySealedEnvelope('call:answer', payload));
+    socket.on('call:ice', (payload = {}) => relaySealedEnvelope('call:ice', payload));
+
+    socket.on('meeting:invite', (payload = {}) => relaySealedEnvelope('meeting:invite', payload));
+    socket.on('meeting:join', (payload = {}) => relaySealedEnvelope('meeting:join', payload));
+    socket.on('meeting:leave', (payload = {}) => relaySealedEnvelope('meeting:leave', payload));
+    socket.on('meeting:end', (payload = {}) => relaySealedEnvelope('meeting:end', payload));
+    socket.on('meeting:offer', (payload = {}) => relaySealedEnvelope('meeting:offer', payload));
+    socket.on('meeting:answer', (payload = {}) => relaySealedEnvelope('meeting:answer', payload));
+    socket.on('meeting:ice', (payload = {}) => relaySealedEnvelope('meeting:ice', payload));
 
     socket.on('message:delivered', async ({ messageId } = {}) => {
       try {

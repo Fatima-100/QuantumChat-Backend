@@ -70,3 +70,46 @@ test('REST call signaling rejects plaintext SDP and candidates', async () => {
   });
   assert.equal(response.status, 400);
 });
+
+test('REST meeting signaling relays only an X5 sealed envelope to its recipient (meetingId reuses the callId field)', async () => {
+  const meetingId = crypto.randomUUID();
+  const plaintext = JSON.stringify({ type: 'invite', callId: meetingId, video: true, groupId: 'g1' });
+  const envelope = sealMessage(plaintext, bob.keySet[0].publicKey);
+
+  const created = await fetch(`${ctx.base}/call-signals`, {
+    method: 'POST',
+    headers: authHeaders(alice.token),
+    body: JSON.stringify({
+      to: bob.user.id,
+      callId: meetingId,
+      event: 'meeting:invite',
+      envelope,
+    }),
+  });
+  assert.equal(created.status, 201);
+
+  const inbox = await fetch(
+    `${ctx.base}/call-signals?after=${encodeURIComponent(new Date(Date.now() - 10_000).toISOString())}`,
+    { headers: authHeaders(bob.token) }
+  ).then((res) => res.json());
+
+  assert.equal(inbox.success, true);
+  const signal = inbox.data.signals.find((item) => item.callId === meetingId);
+  assert.ok(signal);
+  assert.equal(signal.event, 'meeting:invite');
+  assert.equal(unsealMessage(signal.envelope, bob.keySet[0].secretKey), plaintext);
+});
+
+test('REST call signaling rejects unknown event names', async () => {
+  const response = await fetch(`${ctx.base}/call-signals`, {
+    method: 'POST',
+    headers: authHeaders(alice.token),
+    body: JSON.stringify({
+      to: bob.user.id,
+      callId: crypto.randomUUID(),
+      event: 'meeting:not-a-real-event',
+      envelope: sealMessage(JSON.stringify({ type: 'invite' }), bob.keySet[0].publicKey),
+    }),
+  });
+  assert.equal(response.status, 400);
+});

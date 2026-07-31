@@ -163,6 +163,93 @@ test('X5: sealed call envelope relays and only recipient key opens it', async ()
   bobSock.close();
 });
 
+test('X5: meeting signaling rejects plaintext SDP', async () => {
+  const socket = ioClient(ctx.origin, {
+    auth: { token: alice.token },
+    transports: ['websocket'],
+  });
+  await new Promise((resolve, reject) => {
+    socket.on('connect', resolve);
+    socket.on('connect_error', reject);
+    setTimeout(() => reject(new Error('socket connect timeout')), 5000);
+  });
+
+  let leaked = false;
+  const bobSock = ioClient(ctx.origin, {
+    auth: { token: bob.token },
+    transports: ['websocket'],
+  });
+  await new Promise((resolve, reject) => {
+    bobSock.on('connect', resolve);
+    bobSock.on('connect_error', reject);
+    setTimeout(() => reject(new Error('bob socket timeout')), 5000);
+  });
+  bobSock.on('meeting:offer', (payload) => {
+    if (payload?.sdp) leaked = true;
+  });
+
+  socket.emit('meeting:offer', {
+    to: bob.user.id,
+    callId: crypto.randomUUID(),
+    sdp: { type: 'offer', sdp: 'v=0\r\nSECRET_PLAIN_SDP' },
+  });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(leaked, false, 'plaintext SDP must not be relayed for meetings either');
+
+  socket.close();
+  bobSock.close();
+});
+
+test('X5: sealed meeting invite relays and only recipient key opens it', async () => {
+  const meetingId = crypto.randomUUID();
+  const payload = { type: 'invite', callId: meetingId, video: true, marker: SECRET };
+  const envelope = sealMessage(JSON.stringify(payload), bob.keySet[0].publicKey);
+  assert.equal(isSealedEnvelope(envelope), true);
+
+  const bobSock = ioClient(ctx.origin, {
+    auth: { token: bob.token },
+    transports: ['websocket'],
+  });
+  await new Promise((resolve, reject) => {
+    bobSock.on('connect', resolve);
+    bobSock.on('connect_error', reject);
+    setTimeout(() => reject(new Error('bob socket timeout')), 5000);
+  });
+
+  const received = new Promise((resolve, reject) => {
+    bobSock.on('meeting:invite', (msg) => resolve(msg));
+    setTimeout(() => reject(new Error('no sealed meeting invite')), 3000);
+  });
+
+  const aliceSock = ioClient(ctx.origin, {
+    auth: { token: alice.token },
+    transports: ['websocket'],
+  });
+  await new Promise((resolve, reject) => {
+    aliceSock.on('connect', resolve);
+    aliceSock.on('connect_error', reject);
+    setTimeout(() => reject(new Error('alice socket timeout')), 5000);
+  });
+
+  aliceSock.emit('meeting:invite', { to: bob.user.id, callId: meetingId, envelope });
+  const msg = await received;
+  assert.ok(msg.envelope);
+  assert.equal(msg.sdp, undefined);
+  assert.equal(msg.video, undefined);
+
+  const opened = unsealMessage(msg.envelope, bob.keySet[0].secretKey);
+  assert.ok(opened);
+  assert.ok(opened.includes(SECRET));
+
+  for (let i = 1; i < 5; i += 1) {
+    assert.equal(unsealMessage(msg.envelope, bob.keySet[i].secretKey), null);
+  }
+  assert.equal(unsealMessage(msg.envelope, carol.keySet[0].secretKey), null);
+
+  aliceSock.close();
+  bobSock.close();
+});
+
 test('X5: sealed story requires envelopes; outsider cannot fetch media; Mongo has no plaintext', async () => {
   const uploadDir = process.env.UPLOAD_DIR || '.test-uploads';
   fs.mkdirSync(path.join(uploadDir, 'stories'), { recursive: true });
