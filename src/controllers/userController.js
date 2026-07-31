@@ -28,12 +28,10 @@ export async function areUsersBlocked(userAId, userBId) {
 
 export async function listUsers(req, res) {
   const blockedIds = (req.user.blockedUsers || []).map((id) => id);
-  const friendIds = (req.user.friends || []).map((id) => String(id));
   const users = await User.find({
     _id: { $nin: [req.user._id, ...blockedIds] },
   }).select(PUBLIC_FIELDS);
-  const visible = users.filter((u) => u.isSystemUser || friendIds.includes(String(u._id)));
-  res.json({ success: true, data: visible.map((u) => u.toPublicJSON()) });
+  res.json({ success: true, data: users.map((u) => u.toPublicJSON()) });
 }
 
 export async function getMe(req, res) {
