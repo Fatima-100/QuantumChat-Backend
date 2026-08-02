@@ -10,3 +10,6 @@ gitleaks_*.zip
 
 quantum-chat.json
 /quantum-chat.json
+# Local blob storage (dev fallback when Google Drive is unset)
+uploads/
+!uploads/.gitkeep

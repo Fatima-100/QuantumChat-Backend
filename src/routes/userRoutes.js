@@ -12,7 +12,8 @@ import {
   getAvatar,
   exportAccountData,
   deleteAccount,
-discoverUsers,
+  discoverUsers,
+  listFriends,
   listFriendRequests,
   sendFriendRequest,
   cancelFriendRequest,
@@ -63,6 +64,7 @@ router.post('/:id/block', blockUser);
 router.delete('/:id/block', unblockUser);
 router.get('/:id/avatar', getAvatar);
 router.get('/discover', discoverUsers);
+router.get('/friends', listFriends);
 router.get('/friend-requests', listFriendRequests);
 router.post('/friend-requests', sendFriendRequest);
 router.delete('/friend-requests/:id', cancelFriendRequest);

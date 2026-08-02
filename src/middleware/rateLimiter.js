@@ -44,12 +44,26 @@ export const syncLimiter = rateLimit({
   },
 });
 
-/** Separate budget for short-lived encrypted call signaling polling. */
+/**
+ * Separate budget for short-lived encrypted call signaling polling.
+ *
+ * Keyed by user, not IP — same reasoning as syncLimiter. Two people calling
+ * each other from one household/office share an IP, and each client both
+ * polls (~67 req/min at the 900ms interval) and POSTs a signal per ICE
+ * candidate. An IP-keyed budget made them eat each other's allowance, so
+ * setup got far enough to exchange offer/answer and then 429'd on the ICE
+ * candidates — leaving the call stuck on "connecting" forever.
+ *
+ * The limit covers steady-state polling plus a trickle-ICE burst (a peer with
+ * several interfaces / IPv6 can emit 20-30 candidates) with room for a retry.
+ * Requires requireAuth to run first so req.user exists.
+ */
 export const callSignalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  limit: 120,
+  limit: 240,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => String(req.user._id),
   message: { success: false, error: "Too many call signaling requests" },
 });

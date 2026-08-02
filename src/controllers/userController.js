@@ -397,6 +397,33 @@ export async function discoverUsers(req, res) {
   }
 }
 
+/** Accepted friends for the Friends tab. */
+export async function listFriends(req, res) {
+  try {
+    const friendIds = req.user.friends || [];
+    if (!friendIds.length) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const blockedIds = new Set((req.user.blockedUsers || []).map((id) => String(id)));
+    const users = await User.find({
+      _id: { $in: friendIds },
+      isSystemUser: { $ne: true },
+    }).select(PUBLIC_FIELDS);
+
+    const byId = new Map(users.map((u) => [String(u._id), u]));
+    const data = friendIds
+      .map((id) => byId.get(String(id)))
+      .filter(Boolean)
+      .filter((u) => !blockedIds.has(String(u._id)))
+      .map((u) => u.toPublicJSON());
+
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 async function acceptFriendRequestRecord(request, req) {
   request.status = 'accepted';
   await request.save();
@@ -455,7 +482,11 @@ export async function sendFriendRequest(req, res) {
     if (existing) {
       if (String(existing.from) === String(target._id)) {
         await acceptFriendRequestRecord(existing, req);
-        return res.json({ success: true, data: { id: existing._id, status: 'accepted' } });
+        const me = await User.findById(req.user._id);
+        return res.json({
+          success: true,
+          data: { id: existing._id, status: 'accepted', me: me.toSelfJSON() },
+        });
       }
       return res.status(409).json({ success: false, error: 'Friend request already sent' });
     }

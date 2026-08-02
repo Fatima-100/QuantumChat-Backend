@@ -1,13 +1,10 @@
 import { GoogleDriveStorageAdapter } from './GoogleDriveStorageAdapter.js';
+import { LocalDiskStorageAdapter } from './LocalDiskStorageAdapter.js';
 import { MemoryStorageAdapter } from './MemoryStorageAdapter.js';
 
-/** @type {GoogleDriveStorageAdapter | MemoryStorageAdapter | null} */
+/** @type {GoogleDriveStorageAdapter | LocalDiskStorageAdapter | MemoryStorageAdapter | null} */
 let cached;
 
-/**
- * Durable blob storage — Google Drive only (no local uploads/ disk).
- * Requires GOOGLE_DRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY.
- */
 /** Accept raw folder id or a Drive share URL containing /folders/<id>. */
 function normalizeDriveFolderId(raw) {
   const value = String(raw || '').trim();
@@ -15,8 +12,24 @@ function normalizeDriveFolderId(raw) {
   return fromUrl ? fromUrl[1] : value.replace(/\?.*$/, '');
 }
 
+function driveCredentials() {
+  const folderId = normalizeDriveFolderId(process.env.GOOGLE_DRIVE_FOLDER_ID);
+  const email = String(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').trim();
+  const key = String(process.env.GOOGLE_PRIVATE_KEY || '')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/\\n/g, '\n');
+  return { folderId, email, key };
+}
+
+/**
+ * Durable blob storage.
+ * Prefers Google Drive when configured; falls back to local disk in non-production
+ * so local avatar/story uploads work without Drive credentials.
+ */
 export function getStorage() {
   if (cached) return cached;
+
   if (process.env.STORAGE_PROVIDER === 'memory') {
     if (process.env.NODE_ENV !== 'test') {
       throw new Error('Memory storage is restricted to NODE_ENV=test');
@@ -24,21 +37,44 @@ export function getStorage() {
     cached = new MemoryStorageAdapter();
     return cached;
   }
-  const folderId = normalizeDriveFolderId(process.env.GOOGLE_DRIVE_FOLDER_ID);
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const key = process.env.GOOGLE_PRIVATE_KEY;
-  if (!folderId || !email || !key) {
+
+  if (process.env.STORAGE_PROVIDER === 'local') {
+    cached = new LocalDiskStorageAdapter();
+    return cached;
+  }
+
+  const { folderId, email, key } = driveCredentials();
+  if (folderId && email && key) {
+    cached = new GoogleDriveStorageAdapter(folderId, email, key);
+    return cached;
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    const missing = [
+      !folderId && 'GOOGLE_DRIVE_FOLDER_ID',
+      !email && 'GOOGLE_SERVICE_ACCOUNT_EMAIL',
+      !key && 'GOOGLE_PRIVATE_KEY',
+    ].filter(Boolean);
     throw new Error(
-      'Google Drive storage requires GOOGLE_DRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, and GOOGLE_PRIVATE_KEY'
+      `Google Drive storage missing ${missing.join(', ')}. Add them to the environment and restart the server.`
     );
   }
-  cached = new GoogleDriveStorageAdapter(folderId, email, key);
+
+  console.warn(
+    '[storage] Google Drive credentials missing — using local uploads/ folder for development. Set GOOGLE_DRIVE_* in backend/.env for production-like storage.'
+  );
+  cached = new LocalDiskStorageAdapter();
   return cached;
 }
 
 export function getStorageProviderName() {
-  return process.env.STORAGE_PROVIDER === 'memory' ? 'memory' : 'google-drive';
+  if (process.env.STORAGE_PROVIDER === 'memory') return 'memory';
+  if (process.env.STORAGE_PROVIDER === 'local') return 'local';
+  const { folderId, email, key } = driveCredentials();
+  if (folderId && email && key) return 'google-drive';
+  return process.env.NODE_ENV === 'production' ? 'google-drive' : 'local';
 }
 
 export { GoogleDriveStorageAdapter } from './GoogleDriveStorageAdapter.js';
+export { LocalDiskStorageAdapter } from './LocalDiskStorageAdapter.js';
 export { MemoryStorageAdapter } from './MemoryStorageAdapter.js';
