@@ -3,7 +3,8 @@ import Story from '../models/Story.js';
 import Group from '../models/Group.js';
 import Attachment from '../models/Attachment.js';
 import { getStorage } from '../middleware/upload.js';
-
+import User from '../models/User.js';
+import { conversationKey } from '../utils/conversationKey.js';
 async function removeAttachmentFiles(attachmentId) {
   if (!attachmentId) return;
   const attachment = await Attachment.findById(attachmentId);
@@ -20,13 +21,6 @@ async function removeAttachmentFiles(attachmentId) {
   await Attachment.deleteOne({ _id: attachment._id });
 }
 
-function conversationKey(message) {
-  if (message.group) return `group:${message.group}`;
-  const a = String(message.from);
-  const b = String(message.to || '');
-  return `dm:${[a, b].sort().join(':')}`;
-}
-
 export async function purgeExpiredMessages(io) {
   const now = new Date();
   const expired = await Message.find({ expiresAt: { $lte: now, $ne: null } }).limit(200);
@@ -34,7 +28,7 @@ export async function purgeExpiredMessages(io) {
 
   for (const message of expired) {
     const id = message._id.toString();
-    const payload = { id, conversation: conversationKey(message) };
+   const payload = { id, conversation: conversationKey({ group: message.group, from: message.from, to: message.to }) };
 
     try {
       await removeAttachmentFiles(message.attachment);
@@ -86,9 +80,29 @@ export async function purgeExpiredStories(io) {
 
   return expired.length;
 }
+export async function purgeExpiredMutes() {
+  const now = new Date();
+  const users = await User.find({
+    mutedChats: { $elemMatch: { expiresAt: { $ne: null, $lte: now } } },
+  }).select('mutedChats');
+
+  if (!users.length) return 0;
+
+  let cleared = 0;
+  for (const user of users) {
+    const before = user.mutedChats.length;
+    user.mutedChats = user.mutedChats.filter(
+      (m) => m.expiresAt == null || m.expiresAt > now
+    );
+    cleared += before - user.mutedChats.length;
+    await user.save();
+  }
+
+  return cleared;
+}
 
 export async function runExpiryJobs(io) {
-  const [messages, stories] = await Promise.all([
+  const [messages, stories, mutes] = await Promise.all([
     purgeExpiredMessages(io).catch((err) => {
       console.error('purgeExpiredMessages failed:', err.message);
       return 0;
@@ -97,6 +111,10 @@ export async function runExpiryJobs(io) {
       console.error('purgeExpiredStories failed:', err.message);
       return 0;
     }),
+    purgeExpiredMutes().catch((err) => {
+      console.error('purgeExpiredMutes failed:', err.message);
+      return 0;
+    }),
   ]);
-  return { messages, stories };
+  return { messages, stories, mutes };
 }

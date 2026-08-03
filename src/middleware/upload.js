@@ -1,6 +1,6 @@
+import crypto from 'crypto';
 import multer from 'multer';
 import path from 'path';
-import crypto from 'crypto';
 import { getStorage } from '../storage/index.js';
 
 /** Raster images only — SVG is rejected (scriptable when opened as a document). */
@@ -56,6 +56,14 @@ export const groupPhotoUpload = multer({
   fileFilter: rasterImageFilter('Group photo'),
 });
 
+// Wallpapers are viewed full-screen behind the message list, so allow a
+// bigger budget than an avatar (5MB) but still well short of a story (40MB).
+export const wallpaperUpload = multer({
+  storage: memory,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: rasterImageFilter('Wallpaper'),
+});
+
 export const storyUpload = multer({
   storage: memory,
   limits: { fileSize: 40 * 1024 * 1024 },
@@ -89,3 +97,4 @@ export function newObjectName(prefix = '', ext = '') {
 }
 
 export { getStorage };
+

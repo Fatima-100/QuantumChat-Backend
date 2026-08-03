@@ -39,11 +39,13 @@ export function playSendSound() {
   }
 }
 
-/** Soft two-tone chime for an incoming message. */
-export function playReceiveSound() {
+/** Soft two-tone chime for an incoming message. volumeScale is 0–1 (defaults to full volume). */
+export function playReceiveSound(volumeScale = 1) {
+  const scale = Number.isFinite(volumeScale) ? Math.max(0, Math.min(1, volumeScale)) : 1;
+  if (scale <= 0) return;
   try {
-    tone({ frequency: 520, duration: 0.09, type: 'sine', volume: 0.07 });
-    tone({ frequency: 780, duration: 0.12, type: 'sine', volume: 0.06, stagger: 0.08 });
+    tone({ frequency: 520, duration: 0.09, type: 'sine', volume: 0.07 * scale });
+    tone({ frequency: 780, duration: 0.12, type: 'sine', volume: 0.06 * scale, stagger: 0.08 });
   } catch {
     // ignore
   }

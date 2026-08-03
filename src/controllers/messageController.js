@@ -266,7 +266,7 @@ export async function sendMessage(req, res) {
     if (attachmentId && !mongoose.isValidObjectId(attachmentId)) {
       return res.status(400).json({ success: false, error: 'Invalid attachment id' });
     }
-    if (await areUsersBlocked(req.user._id, to)) {
+    if (await areUsersBlocked(req.user._id, to, req.user.blockedUsers)) {
       return res.status(403).json({ success: false, error: 'Cannot message a blocked user' });
     }
 
@@ -295,9 +295,13 @@ export async function sendMessage(req, res) {
       ...(forwardPolicy ? { forwardPolicy } : {}),
     });
 
-    const message = await Message.findById(created._id)
-      .populate('attachment', ATTACHMENT_POPULATE)
-      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+    // Skip a second round-trip when nothing needs populate — text sends are the hot path.
+    let message = created;
+    if (attachmentId || replyToId) {
+      message = await Message.findById(created._id)
+        .populate('attachment', ATTACHMENT_POPULATE)
+        .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+    }
     const payload = toClientMessage(message);
 
     const io = req.app.get('io');

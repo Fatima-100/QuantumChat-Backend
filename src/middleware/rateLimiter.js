@@ -67,3 +67,17 @@ export const callSignalLimiter = rateLimit({
   keyGenerator: (req) => String(req.user._id),
   message: { success: false, error: "Too many call signaling requests" },
 });
+
+/** Stricter budget for email/phone friend lookup (enumeration risk). */
+export const contactLookupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => String(req.user?._id || req.ip),
+  message: {
+    success: false,
+    error: "Too many contact lookups, please try again shortly",
+  },
+});
