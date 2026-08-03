@@ -110,9 +110,6 @@ export async function createGroup(req, res) {
     const requestedIds = Array.isArray(memberIds) ? memberIds : [];
     const uniqueIds = [...new Set(requestedIds.map(String))].filter((id) => id !== req.user._id.toString());
 
-    if (visibility === 'private' && uniqueIds.length < 1) {
-      return res.status(400).json({ success: false, error: 'Select at least one other member' });
-    }
     if (uniqueIds.some((id) => !mongoose.isValidObjectId(id))) {
       return res.status(400).json({ success: false, error: 'Invalid member id' });
     }
