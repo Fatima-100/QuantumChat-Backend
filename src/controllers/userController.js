@@ -37,10 +37,18 @@ export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
 
 export async function listUsers(req, res) {
   const blockedIds = (req.user.blockedUsers || []).map((id) => id);
+  const friendIds = new Set((req.user.friends || []).map((id) => String(id)));
   const users = await User.find({
     _id: { $nin: [req.user._id, ...blockedIds] },
   }).select(PUBLIC_FIELDS);
-  res.json({ success: true, data: users.map((u) => u.toPublicJSON()) });
+  const data = users
+    .filter(
+      (u) =>
+        friendIds.has(String(u._id)) ||
+        (u.privacy?.discoverable || 'everyone') !== 'nobody',
+    )
+    .map((u) => u.toPublicJSON());
+  res.json({ success: true, data });
 }
 
 export async function getMe(req, res) {
@@ -108,22 +116,76 @@ export async function updateProfile(req, res) {
       user.phone = normalized;
     }
     if (privacy && typeof privacy === 'object') {
-      user.privacy = user.privacy || {};
-      if (privacy.lastSeen === 'everyone' || privacy.lastSeen === 'nobody') {
-        user.privacy.lastSeen = privacy.lastSeen;
-      }
-      if (privacy.online === 'everyone' || privacy.online === 'nobody') {
-        user.privacy.online = privacy.online;
-      }
-      if (typeof privacy.readReceipts === 'boolean') {
-        user.privacy.readReceipts = privacy.readReceipts;
-      }
+      applyPrivacyPatch(user, privacy);
     }
 
     await user.save();
     res.json({ success: true, data: user.toSelfJSON() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** Dedicated privacy settings endpoint used by Settings → Privacy. */
+export async function updatePrivacy(req, res) {
+  try {
+    const user = req.user;
+    applyPrivacyPatch(user, req.body || {});
+    await user.save();
+    const self = user.toSelfJSON();
+    res.json({ success: true, data: self.privacy, user: self });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+}
+
+function applyPrivacyPatch(user, privacy) {
+  if (!privacy || typeof privacy !== 'object') return;
+  user.privacy = user.privacy || {};
+
+  const lastSeenOk = ['everyone', 'friends', 'nobody'];
+  const readOk = ['everyone', 'friends', 'nobody'];
+  const onlineStatusOk = ['everyone', 'friends', 'selected'];
+  const whoOk = ['everyone', 'friends', 'friendsOfFriends'];
+  const discoverOk = ['everyone', 'nobody'];
+
+  if (lastSeenOk.includes(privacy.lastSeen)) {
+    user.privacy.lastSeen = privacy.lastSeen;
+  }
+
+  if (typeof privacy.readReceipts === 'boolean') {
+    user.privacy.readReceipts = privacy.readReceipts ? 'everyone' : 'nobody';
+  } else if (readOk.includes(privacy.readReceipts)) {
+    user.privacy.readReceipts = privacy.readReceipts;
+  }
+
+  if (onlineStatusOk.includes(privacy.onlineStatus)) {
+    user.privacy.onlineStatus = privacy.onlineStatus;
+    // Presence still broadcasts; consumers should honor onlineStatus / visibleTo.
+    user.privacy.online = 'everyone';
+  } else if (privacy.online === 'everyone' || privacy.online === 'nobody') {
+    user.privacy.online = privacy.online;
+    if (!user.privacy.onlineStatus) {
+      user.privacy.onlineStatus = privacy.online === 'nobody' ? 'selected' : 'everyone';
+    }
+  }
+
+  if (Array.isArray(privacy.onlineStatusVisibleTo)) {
+    const friendSet = new Set((user.friends || []).map((id) => String(id)));
+    const next = [];
+    for (const raw of privacy.onlineStatusVisibleTo) {
+      const id = toObjectId(raw);
+      if (id && friendSet.has(String(id))) next.push(id);
+    }
+    user.privacy.onlineStatusVisibleTo = next;
+  }
+
+  if (whoOk.includes(privacy.whoCanMessage)) {
+    user.privacy.whoCanMessage = privacy.whoCanMessage;
+  }
+  if (discoverOk.includes(privacy.discoverable)) {
+    user.privacy.discoverable = privacy.discoverable;
   }
 }
 export async function getNotificationSettings(req, res) {
@@ -498,7 +560,10 @@ export async function discoverUsers(req, res) {
 
     const users = await User.find(filter).select(PUBLIC_FIELDS).limit(100);
     const candidates = users.filter(
-      (u) => !blockedIds.includes(String(u._id)) && !friendIds.includes(String(u._id))
+      (u) =>
+        !blockedIds.includes(String(u._id)) &&
+        !friendIds.includes(String(u._id)) &&
+        (u.privacy?.discoverable || 'everyone') !== 'nobody'
     );
     const candidateIds = candidates.map((u) => u._id);
 

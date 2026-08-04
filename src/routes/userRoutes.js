@@ -4,6 +4,7 @@ import {
   getUser,
   updatePublicKeys,
   updateProfile,
+  updatePrivacy,
   blockUser,
   unblockUser,
   listBlockedUsers,
@@ -48,6 +49,7 @@ router.get('/', listUsers);
 router.get('/me', getMe);
 router.get('/me/public-keys', getMyPublicKeys);
 router.patch('/me', updateProfile);
+router.patch('/me/privacy', updatePrivacy);
 router.patch('/me/public-keys', updatePublicKeys);
 router.get('/me/notification-settings', getNotificationSettings);
 router.put('/me/notification-settings', updateNotificationSettings);
