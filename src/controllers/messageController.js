@@ -42,8 +42,15 @@ function allowsReadReceipts(privacy) {
 }
 
 async function assertCanDirectMessage(senderId, recipientId) {
-  if (String(senderId) === String(recipientId)) return;
-  const recipient = await User.findById(recipientId).select('privacy friends');
+  const recipientOid = toObjectId(recipientId);
+  const senderOid = toObjectId(senderId);
+  if (!recipientOid || !senderOid) {
+    const err = new Error('Invalid recipient id');
+    err.status = 400;
+    throw err;
+  }
+  if (String(senderOid) === String(recipientOid)) return;
+  const recipient = await User.findById(recipientOid).select('privacy friends');
   if (!recipient) {
     const err = new Error('Recipient not found');
     err.status = 404;
@@ -53,7 +60,7 @@ async function assertCanDirectMessage(senderId, recipientId) {
   if (policy === 'everyone') return;
 
   const recipientFriends = (recipient.friends || []).map(String);
-  const senderIsFriend = recipientFriends.includes(String(senderId));
+  const senderIsFriend = recipientFriends.includes(String(senderOid));
   if (policy === 'friends') {
     if (!senderIsFriend) {
       const err = new Error('This user only accepts messages from friends');
@@ -64,7 +71,7 @@ async function assertCanDirectMessage(senderId, recipientId) {
   }
   if (policy === 'friendsOfFriends') {
     if (senderIsFriend) return;
-    const sender = await User.findById(senderId).select('friends');
+    const sender = await User.findById(senderOid).select('friends');
     const senderFriends = new Set((sender?.friends || []).map(String));
     const mutual = recipientFriends.some((id) => senderFriends.has(id));
     if (!mutual) {
