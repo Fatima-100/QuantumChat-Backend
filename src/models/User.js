@@ -7,9 +7,31 @@ export const KEY_SET_SIZE = 5;
 
 const privacySchema = new mongoose.Schema(
   {
-    lastSeen: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
+    lastSeen: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    /** Legacy presence gate used by sockets (`everyone` | `nobody`). */
     online: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
-    readReceipts: { type: Boolean, default: true },
+    onlineStatus: {
+      type: String,
+      enum: ['everyone', 'friends', 'selected'],
+      default: 'everyone',
+    },
+    onlineStatusVisibleTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    /** Boolean (legacy) or `everyone` | `friends` | `nobody`. */
+    readReceipts: { type: mongoose.Schema.Types.Mixed, default: 'everyone' },
+    whoCanMessage: {
+      type: String,
+      enum: ['everyone', 'friends', 'friendsOfFriends'],
+      default: 'everyone',
+    },
+    discoverable: {
+      type: String,
+      enum: ['everyone', 'nobody'],
+      default: 'everyone',
+    },
   },
   { _id: false }
 );
@@ -238,6 +260,18 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
   const privacy = this.privacy || {};
   const showLastSeen = privacy.lastSeen !== 'nobody';
 
+  let readReceipts = privacy.readReceipts;
+  if (typeof readReceipts === 'boolean') {
+    readReceipts = readReceipts ? 'everyone' : 'nobody';
+  } else if (!['everyone', 'friends', 'nobody'].includes(readReceipts)) {
+    readReceipts = 'everyone';
+  }
+
+  const onlineStatus =
+    privacy.onlineStatus ||
+    (privacy.online === 'nobody' ? 'selected' : privacy.online) ||
+    'everyone';
+
   return {
     id: this._id,
     username: this.username,
@@ -250,7 +284,13 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
     privacy: {
       lastSeen: privacy.lastSeen || 'everyone',
       online: privacy.online || 'everyone',
-      readReceipts: privacy.readReceipts !== false,
+      onlineStatus,
+      onlineStatusVisibleTo: Array.isArray(privacy.onlineStatusVisibleTo)
+        ? privacy.onlineStatusVisibleTo.map((id) => String(id._id || id))
+        : [],
+      readReceipts,
+      whoCanMessage: privacy.whoCanMessage || 'everyone',
+      discoverable: privacy.discoverable || 'everyone',
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,

@@ -35,6 +35,53 @@ function normalizeEnvelope(envelope) {
   };
 }
 
+function allowsReadReceipts(privacy) {
+  const value = privacy?.readReceipts;
+  if (value === false || value === 'nobody') return false;
+  return true;
+}
+
+async function assertCanDirectMessage(senderId, recipientId) {
+  const recipientOid = toObjectId(recipientId);
+  const senderOid = toObjectId(senderId);
+  if (!recipientOid || !senderOid) {
+    const err = new Error('Invalid recipient id');
+    err.status = 400;
+    throw err;
+  }
+  if (String(senderOid) === String(recipientOid)) return;
+  const recipient = await User.findById(recipientOid).select('privacy friends');
+  if (!recipient) {
+    const err = new Error('Recipient not found');
+    err.status = 404;
+    throw err;
+  }
+  const policy = recipient.privacy?.whoCanMessage || 'everyone';
+  if (policy === 'everyone') return;
+
+  const recipientFriends = (recipient.friends || []).map(String);
+  const senderIsFriend = recipientFriends.includes(String(senderOid));
+  if (policy === 'friends') {
+    if (!senderIsFriend) {
+      const err = new Error('This user only accepts messages from friends');
+      err.status = 403;
+      throw err;
+    }
+    return;
+  }
+  if (policy === 'friendsOfFriends') {
+    if (senderIsFriend) return;
+    const sender = await User.findById(senderOid).select('friends');
+    const senderFriends = new Set((sender?.friends || []).map(String));
+    const mutual = recipientFriends.some((id) => senderFriends.has(id));
+    if (!mutual) {
+      const err = new Error('This user only accepts messages from friends of friends');
+      err.status = 403;
+      throw err;
+    }
+  }
+}
+
 function toClientMessage(doc) {
   const message = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
   message.id = message._id;
@@ -269,6 +316,7 @@ export async function sendMessage(req, res) {
     if (await areUsersBlocked(req.user._id, to, req.user.blockedUsers)) {
       return res.status(403).json({ success: false, error: 'Cannot message a blocked user' });
     }
+    await assertCanDirectMessage(req.user._id, to);
 
     const expiresAt = resolveExpiresAt(expiresInSeconds);
     if (expiresAt === null) {
@@ -423,7 +471,7 @@ export async function getConversation(req, res) {
     const now = new Date();
     const deliveredIds = [];
     const readIds = [];
-    const allowReadReceipts = req.user.privacy?.readReceipts !== false;
+    const allowReadReceipts = allowsReadReceipts(req.user.privacy);
     for (const msg of page) {
       if (String(msg.from) === String(userId) && String(msg.to) === String(req.user._id)) {
         if (!msg.deliveredAt) {
@@ -561,7 +609,7 @@ export async function markConversationRead(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid user id' });
     }
     const now = new Date();
-    if (req.user.privacy?.readReceipts === false) {
+    if (!allowsReadReceipts(req.user.privacy)) {
       const delivered = await Message.updateMany(
         { from: userId, to: req.user._id, deliveredAt: null },
         { $set: { deliveredAt: now } }
