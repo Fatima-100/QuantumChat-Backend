@@ -303,12 +303,18 @@ export async function sendMessage(req, res) {
         .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
     }
     const payload = toClientMessage(message);
+    const isSelfChat = String(to) === String(req.user._id);
 
     const io = req.app.get('io');
-    if (io) io.to(to.toString()).emit('message:new', payload);
-    if (io) io.to(req.user._id.toString()).emit('message:new', payload);
+    if (io) {
+      io.to(to.toString()).emit('message:new', payload);
+      // Self-notes: room is the same — don't emit twice.
+      if (!isSelfChat) {
+        io.to(req.user._id.toString()).emit('message:new', payload);
+      }
+    }
 
-    if (!isUserOnline(to)) {
+    if (!isSelfChat && !isUserOnline(to)) {
       notifyUser(to, { title: 'QuantumChat', body: 'New message' }).catch(() => {});
     }
 
