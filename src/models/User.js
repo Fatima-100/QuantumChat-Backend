@@ -1,6 +1,6 @@
-import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 export const KEY_SET_SIZE = 5;
@@ -32,6 +32,12 @@ const privacySchema = new mongoose.Schema(
       enum: ['everyone', 'nobody'],
       default: 'everyone',
     },
+    story: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody', 'selected'],
+      default: 'everyone',
+    },
+    storyViewers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   },
   { _id: false }
 );
@@ -291,6 +297,10 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
       readReceipts,
       whoCanMessage: privacy.whoCanMessage || 'everyone',
       discoverable: privacy.discoverable || 'everyone',
+      story: privacy.story || 'everyone',
+      storyViewers: Array.isArray(privacy.storyViewers)
+        ? privacy.storyViewers.map((id) => String(id._id || id))
+        : [],
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,

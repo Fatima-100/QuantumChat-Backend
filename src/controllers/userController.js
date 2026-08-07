@@ -1,13 +1,12 @@
-import User, { KEY_SET_SIZE } from '../models/User.js';
-import Group from '../models/Group.js';
-import Message from '../models/Message.js';
+import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Attachment from '../models/Attachment.js';
 import FriendRequest from '../models/FriendRequest.js';
-import mongoose from 'mongoose';
-import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
-import { toObjectId } from '../utils/toObjectId.js';
+import Group from '../models/Group.js';
+import Message from '../models/Message.js';
+import User, { KEY_SET_SIZE } from '../models/User.js';
 import { conversationKey } from '../utils/conversationKey.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
+import { toObjectId } from '../utils/toObjectId.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
@@ -148,6 +147,7 @@ function applyPrivacyPatch(user, privacy) {
   const readOk = ['everyone', 'friends', 'nobody'];
   const onlineStatusOk = ['everyone', 'friends', 'selected'];
   const whoOk = ['everyone', 'friends', 'friendsOfFriends'];
+  const storyOk = ['everyone', 'friends', 'nobody', 'selected']; 
   const discoverOk = ['everyone', 'nobody'];
 
   if (lastSeenOk.includes(privacy.lastSeen)) {
@@ -186,6 +186,19 @@ function applyPrivacyPatch(user, privacy) {
   }
   if (discoverOk.includes(privacy.discoverable)) {
     user.privacy.discoverable = privacy.discoverable;
+  }
+  // --- Story privacy (new) ---
+  if (storyOk.includes(privacy.story)) {
+    user.privacy.story = privacy.story;
+  }
+  if (Array.isArray(privacy.storyViewers)) {
+    const friendSet = new Set((user.friends || []).map((id) => String(id)));
+    const next = [];
+    for (const raw of privacy.storyViewers) {
+      const id = toObjectId(raw);
+      if (id && friendSet.has(String(id))) next.push(id);
+    }
+    user.privacy.storyViewers = next;
   }
 }
 export async function getNotificationSettings(req, res) {
