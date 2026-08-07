@@ -1,6 +1,11 @@
 import crypto from 'crypto';
 import User, { KEY_SET_SIZE } from '../models/User.js';
-import { generateToken, generate2faTempToken, verifyToken } from '../utils/generateToken.js';
+import {
+  generateToken,
+  generate2faTempToken,
+  verifyToken,
+  rememberMeExpiresIn,
+} from '../utils/generateToken.js';
 import { appBaseUrl, sendAppMail, shouldExposeEmailLinks } from '../utils/mail.js';
 import { registerSession } from './sessionController.js';
 import { generateTotpSecret, buildOtpauthUrl, verifyTotp } from '../utils/totp.js';
@@ -15,15 +20,17 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-async function issueSession(user, req, { deviceLabel } = {}) {
+async function issueSession(user, req, { deviceLabel, rememberMe = true } = {}) {
   user.lastLoginAt = new Date();
   await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: user.lastLoginAt } });
   const deviceSession = await registerSession(user._id, req, { deviceLabel });
-  const token = generateToken(user._id);
+  const expiresIn = rememberMe ? rememberMeExpiresIn() : process.env.JWT_EXPIRES_IN || '30d';
+  const token = generateToken(user._id, { expiresIn });
   return {
     token,
     user: user.toSelfJSON(),
     sessionId: deviceSession.sessionId,
+    expiresIn,
   };
 }
 
@@ -90,7 +97,7 @@ export async function register(req, res) {
 
 export async function login(req, res) {
   try {
-    const { email, password, deviceLabel } = req.body;
+    const { email, password, deviceLabel, rememberMe } = req.body;
     if (!email || !password) {
       return res.status(400).json({ success: false, error: 'email and password are required' });
     }
@@ -100,6 +107,8 @@ export async function login(req, res) {
       return res.status(401).json({ success: false, error: 'Invalid email or password' });
     }
 
+    const staySignedIn = rememberMe !== false;
+
     if (user.totpEnabled) {
       const tempToken = generate2faTempToken(user._id);
       return res.json({
@@ -107,11 +116,12 @@ export async function login(req, res) {
         data: {
           requires2fa: true,
           tempToken,
+          rememberMe: staySignedIn,
         },
       });
     }
 
-    const session = await issueSession(user, req, { deviceLabel });
+    const session = await issueSession(user, req, { deviceLabel, rememberMe: staySignedIn });
     res.json({ success: true, data: session });
   } catch (err) {
     console.error('login failed:', err);
@@ -194,7 +204,7 @@ export async function disable2fa(req, res) {
 
 export async function verify2fa(req, res) {
   try {
-    const { tempToken, token, deviceLabel } = req.body || {};
+    const { tempToken, token, deviceLabel, rememberMe } = req.body || {};
     if (!tempToken || !token) {
       return res.status(400).json({ success: false, error: 'tempToken and token are required' });
     }
@@ -217,7 +227,10 @@ export async function verify2fa(req, res) {
       return res.status(401).json({ success: false, error: 'Invalid authenticator code' });
     }
 
-    const session = await issueSession(user, req, { deviceLabel });
+    const session = await issueSession(user, req, {
+      deviceLabel,
+      rememberMe: rememberMe !== false,
+    });
     res.json({ success: true, data: session });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -225,7 +238,15 @@ export async function verify2fa(req, res) {
 }
 
 export async function me(req, res) {
-  res.json({ success: true, data: { user: req.user.toSelfJSON() } });
+  // Sliding session: issue a fresh token so active users stay signed in.
+  const token = generateToken(req.user._id, { expiresIn: rememberMeExpiresIn() });
+  res.json({
+    success: true,
+    data: {
+      user: req.user.toSelfJSON(),
+      token,
+    },
+  });
 }
 
 export async function changePassword(req, res) {
