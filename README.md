@@ -60,13 +60,16 @@ security-canary/             # intentional failing canary (not part of npm test)
 | `MONGODB_URI`        | —                             | **Required.** Mongo connection string            |
 | `JWT_SECRET`         | —                             | **Required.** JWT signing secret                 |
 | `JWT_EXPIRES_IN`     | 7d                            | Token lifetime                                   |
-| `GOOGLE_DRIVE_FOLDER_ID` | —                          | **Required.** Shared Drive folder id             |
-| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | —                    | **Required.** Drive service account email        |
-| `GOOGLE_PRIVATE_KEY` | —                             | **Required.** Service account private key PEM    |
+| `GOOGLE_DRIVE_FOLDER_ID` | —                          | **Required** (prod). Drive folder id             |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REFRESH_TOKEN` | — | Personal Google account auth (no Workspace needed) — see below |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` / `GOOGLE_PRIVATE_KEY` | —          | Service account auth — **requires a Workspace Shared Drive** |
 | `CLIENT_URL`         | `http://localhost:5173`       | Comma-separated CORS allowlist                   |
 | `SECURITY_FUZZ_KEYS` | `128` (PR) / `1000` (nightly) | Random-key samples in crypto fuzz tests          |
 
-Blob storage is **Google Drive only** (no local `uploads/` directory). Share the folder only with the service account.
+Blob storage is **Google Drive only** in production (no local `uploads/` directory). Two auth modes:
+
+- **Personal Google account (recommended without Workspace):** OAuth2 delegated to your own account — uploads use that account's normal 15GB quota, and `GOOGLE_DRIVE_FOLDER_ID` is just a plain folder in your own My Drive. Run `node scripts/get-drive-oauth-token.mjs` once to obtain `GOOGLE_OAUTH_REFRESH_TOKEN` (see that file for the one-time Google Cloud Console setup).
+- **Google Workspace:** a service account + a Shared Drive folder shared with it as Content manager. Service accounts have **no storage quota on regular My Drive**, so this mode fails with `storageQuotaExceeded` unless the folder is actually inside a Shared Drive.
 
 ## Testing — Security and Vulnerability Detection System
 

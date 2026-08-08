@@ -1,3 +1,4 @@
+import { google } from 'googleapis';
 import { GoogleDriveStorageAdapter } from './GoogleDriveStorageAdapter.js';
 import { LocalDiskStorageAdapter } from './LocalDiskStorageAdapter.js';
 import { MemoryStorageAdapter } from './MemoryStorageAdapter.js';
@@ -12,14 +13,49 @@ function normalizeDriveFolderId(raw) {
   return fromUrl ? fromUrl[1] : value.replace(/\?.*$/, '');
 }
 
-function driveCredentials() {
-  const folderId = normalizeDriveFolderId(process.env.GOOGLE_DRIVE_FOLDER_ID);
+/**
+ * OAuth2 delegated to a personal Google account. Uploads land in that
+ * account's own My Drive and count against its normal 15GB quota — no
+ * Shared Drive (Workspace) required.
+ */
+function driveOAuthCredentials() {
+  const clientId = String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+  const clientSecret = String(process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+  const refreshToken = String(process.env.GOOGLE_OAUTH_REFRESH_TOKEN || '').trim();
+  return { clientId, clientSecret, refreshToken };
+}
+
+/**
+ * Service account JWT. Only works when GOOGLE_DRIVE_FOLDER_ID points into a
+ * Shared Drive — service accounts have no quota on regular My Drive folders.
+ */
+function driveServiceAccountCredentials() {
   const email = String(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').trim();
   const key = String(process.env.GOOGLE_PRIVATE_KEY || '')
     .trim()
     .replace(/^["']|["']$/g, '')
     .replace(/\\n/g, '\n');
-  return { folderId, email, key };
+  return { email, key };
+}
+
+function buildDriveAuth() {
+  const { clientId, clientSecret, refreshToken } = driveOAuthCredentials();
+  if (clientId && clientSecret && refreshToken) {
+    const auth = new google.auth.OAuth2(clientId, clientSecret);
+    auth.setCredentials({ refresh_token: refreshToken });
+    return auth;
+  }
+
+  const { email, key } = driveServiceAccountCredentials();
+  if (email && key) {
+    return new google.auth.JWT({
+      email,
+      key,
+      scopes: ['https://www.googleapis.com/auth/drive'],
+    });
+  }
+
+  return null;
 }
 
 /**
@@ -43,17 +79,18 @@ export function getStorage() {
     return cached;
   }
 
-  const { folderId, email, key } = driveCredentials();
-  if (folderId && email && key) {
-    cached = new GoogleDriveStorageAdapter(folderId, email, key);
+  const folderId = normalizeDriveFolderId(process.env.GOOGLE_DRIVE_FOLDER_ID);
+  const auth = buildDriveAuth();
+  if (folderId && auth) {
+    cached = new GoogleDriveStorageAdapter(folderId, auth);
     return cached;
   }
 
   if (process.env.NODE_ENV === 'production') {
     const missing = [
       !folderId && 'GOOGLE_DRIVE_FOLDER_ID',
-      !email && 'GOOGLE_SERVICE_ACCOUNT_EMAIL',
-      !key && 'GOOGLE_PRIVATE_KEY',
+      !auth &&
+        'GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET/GOOGLE_OAUTH_REFRESH_TOKEN (or GOOGLE_SERVICE_ACCOUNT_EMAIL/GOOGLE_PRIVATE_KEY)',
     ].filter(Boolean);
     throw new Error(
       `Google Drive storage missing ${missing.join(', ')}. Add them to the environment and restart the server.`
@@ -70,8 +107,8 @@ export function getStorage() {
 export function getStorageProviderName() {
   if (process.env.STORAGE_PROVIDER === 'memory') return 'memory';
   if (process.env.STORAGE_PROVIDER === 'local') return 'local';
-  const { folderId, email, key } = driveCredentials();
-  if (folderId && email && key) return 'google-drive';
+  const folderId = normalizeDriveFolderId(process.env.GOOGLE_DRIVE_FOLDER_ID);
+  if (folderId && buildDriveAuth()) return 'google-drive';
   return process.env.NODE_ENV === 'production' ? 'google-drive' : 'local';
 }
 
