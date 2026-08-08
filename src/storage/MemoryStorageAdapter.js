@@ -18,6 +18,11 @@ export class MemoryStorageAdapter {
     return { key, provider: 'memory' };
   }
 
+  /** @returns {Promise<{ mode: 'proxy' }>} */
+  async createUploadTarget() {
+    return { mode: 'proxy' };
+  }
+
   async read(key) {
     const value = this.objects.get(key);
     if (!value) {

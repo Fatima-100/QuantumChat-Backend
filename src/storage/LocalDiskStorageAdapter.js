@@ -47,6 +47,15 @@ export class LocalDiskStorageAdapter {
     return { key: relative.replace(/\\/g, '/'), provider: 'local' };
   }
 
+  /**
+   * No direct-from-browser upload target for local disk — the server has to
+   * write the file itself. Bytes go through the normal proxy (bytes) route.
+   * @returns {Promise<{ mode: 'proxy' }>}
+   */
+  async createUploadTarget() {
+    return { mode: 'proxy' };
+  }
+
   async read(key) {
     try {
       return await fs.readFile(this.resolveKey(key));
