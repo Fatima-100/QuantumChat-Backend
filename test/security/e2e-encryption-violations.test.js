@@ -169,17 +169,17 @@ test('[CONTROL] public group intentionally stores plaintext content (not E2E)', 
 });
 
 test('[VIOLATION] attachment upload without sealed headers is rejected', async () => {
-  const form = new FormData();
-  form.append('file', new Blob([Buffer.from(SECRET)], { type: 'text/plain' }), 'leak.txt');
-  form.append('recipientId', bob.user.id);
-
-  const res = await fetch(`${ctx.base}/attachments`, {
+  const { status, body } = await fetchJson(`${ctx.base}/attachments/init`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${alice.token}` },
-    body: form,
+    headers: authHeaders(alice.token),
+    body: JSON.stringify({
+      recipientId: bob.user.id,
+      filename: 'leak.txt',
+      mimetype: 'text/plain',
+      size: Buffer.byteLength(SECRET),
+    }),
   });
-  const body = await res.json().catch(() => ({}));
-  assert.equal(res.status, 400);
+  assert.equal(status, 400);
   assert.equal(body.success, false);
   assert.match(String(body.error || ''), /nonce|ephemeralPublicKey|targetPublicKey/i);
 });

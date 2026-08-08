@@ -17,6 +17,7 @@ export class GoogleDriveStorageAdapter {
    */
   constructor(folderId, auth) {
     this.folderId = folderId;
+    this.auth = auth;
     this.drive = google.drive({ version: 'v3', auth });
     this.ready = undefined;
   }
@@ -59,6 +60,50 @@ export class GoogleDriveStorageAdapter {
     });
     if (!response.data.id) throw new Error('Google Drive did not return a file id');
     return { key: response.data.id, provider: 'google-drive' };
+  }
+
+  /**
+   * Starts a resumable upload session and returns the session URL the
+   * *browser* should PUT the ciphertext bytes to directly. This is what lets
+   * large files bypass Vercel's ~4.5MB serverless request body cap — the
+   * bytes never pass through our server.
+   *
+   * @param {string} name
+   * @param {string} mimeType
+   * @param {number} size
+   * @param {string} userId
+   * @returns {Promise<{ mode: 'direct', uploadUrl: string }>}
+   */
+  async createUploadTarget(name, mimeType, size, userId) {
+    await this.ensureReady();
+    const { token } = await this.auth.getAccessToken();
+    if (!token) throw new Error('Failed to obtain Google access token');
+
+    const response = await fetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true&fields=id',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json; charset=UTF-8',
+          'X-Upload-Content-Type': mimeType || 'application/octet-stream',
+          ...(size ? { 'X-Upload-Content-Length': String(size) } : {}),
+        },
+        body: JSON.stringify({
+          name,
+          parents: [this.folderId],
+          appProperties: { quantumChatUserId: String(userId || '') },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`Failed to start Drive resumable upload: ${response.status} ${detail}`.trim());
+    }
+    const uploadUrl = response.headers.get('location');
+    if (!uploadUrl) throw new Error('Google Drive did not return a resumable upload URL');
+    return { mode: 'direct', uploadUrl };
   }
 
   async read(key) {
