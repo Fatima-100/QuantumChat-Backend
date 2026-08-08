@@ -2,22 +2,21 @@ import { Readable } from 'stream';
 import { google } from 'googleapis';
 
 /**
- * Durable blob storage for Vercel via a Shared Drive folder + service account.
+ * Durable blob storage for Vercel via a Google Drive folder.
  * Keys are Google Drive file ids. Ciphertext only — never store plaintext secrets here.
+ *
+ * Auth is either a service account JWT (requires a Shared Drive — Workspace only,
+ * since service accounts have no storage quota on regular My Drive) or an OAuth2
+ * client delegated to a personal Google account (uploads count against that
+ * account's own 15GB quota; no Shared Drive needed).
  */
 export class GoogleDriveStorageAdapter {
   /**
    * @param {string} folderId
-   * @param {string} serviceAccountEmail
-   * @param {string} privateKey
+   * @param {import('google-auth-library').OAuth2Client | InstanceType<typeof google.auth.JWT>} auth
    */
-  constructor(folderId, serviceAccountEmail, privateKey) {
+  constructor(folderId, auth) {
     this.folderId = folderId;
-    const auth = new google.auth.JWT({
-      email: serviceAccountEmail,
-      key: String(privateKey || '').replace(/\\n/g, '\n'),
-      scopes: ['https://www.googleapis.com/auth/drive'],
-    });
     this.drive = google.drive({ version: 'v3', auth });
     this.ready = undefined;
   }
