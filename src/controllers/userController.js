@@ -36,19 +36,51 @@ export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
 }
 
 export async function listUsers(req, res) {
-  const blockedIds = (req.user.blockedUsers || []).map((id) => id);
-  const friendIds = new Set((req.user.friends || []).map((id) => String(id)));
-  const users = await User.find({
-    _id: { $nin: [req.user._id, ...blockedIds] },
-  }).select(PUBLIC_FIELDS);
-  const data = users
-    .filter(
-      (u) =>
-        friendIds.has(String(u._id)) ||
-        (u.privacy?.discoverable || 'everyone') !== 'nobody',
-    )
-    .map((u) => u.toPublicJSON());
-  res.json({ success: true, data });
+  try {
+    const blockedIds = (req.user.blockedUsers || []).map((id) => id);
+    const friendIds = new Set((req.user.friends || []).map((id) => String(id)));
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const cursor = req.query.cursor ? toObjectId(req.query.cursor) : null;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+    const filter = { _id: { $nin: [req.user._id, ...blockedIds] } };
+    if (cursor) filter._id.$gt = cursor;
+    if (q) {
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { username: { $regex: escaped, $options: 'i' } },
+        { displayName: { $regex: escaped, $options: 'i' } },
+      ];
+    }
+
+    const rows = await User.find(filter)
+      .sort({ _id: 1 })
+      .limit(limit + 1)
+      .select(PUBLIC_FIELDS);
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    const data = page
+      .filter(
+        (u) =>
+          friendIds.has(String(u._id)) ||
+          (u.privacy?.discoverable || 'everyone') !== 'nobody',
+      )
+      .map((u) => u.toPublicJSON());
+
+    res.json({
+      success: true,
+      data,
+      meta: {
+        hasMore,
+        nextCursor: page.length ? String(page[page.length - 1]._id) : null,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 }
 
 export async function getMe(req, res) {
