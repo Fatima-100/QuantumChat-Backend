@@ -72,9 +72,13 @@ export class GoogleDriveStorageAdapter {
    * @param {string} mimeType
    * @param {number} size
    * @param {string} userId
+   * @param {string} [origin] Browser Origin the upload will PUT from. Drive only
+   *   enables CORS on the resulting session for the origin present on *this*
+   *   initiating request — omitting it leaves the session with no
+   *   Access-Control-Allow-Origin, and the browser's follow-up PUT gets blocked.
    * @returns {Promise<{ mode: 'direct', uploadUrl: string }>}
    */
-  async createUploadTarget(name, mimeType, size, userId) {
+  async createUploadTarget(name, mimeType, size, userId, origin) {
     await this.ensureReady();
     const { token } = await this.auth.getAccessToken();
     if (!token) throw new Error('Failed to obtain Google access token');
@@ -88,6 +92,7 @@ export class GoogleDriveStorageAdapter {
           'Content-Type': 'application/json; charset=UTF-8',
           'X-Upload-Content-Type': mimeType || 'application/octet-stream',
           ...(size ? { 'X-Upload-Content-Length': String(size) } : {}),
+          ...(origin ? { Origin: origin } : {}),
         },
         body: JSON.stringify({
           name,

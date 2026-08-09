@@ -11,6 +11,8 @@ import messageRoutes from './routes/messageRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
+import { allowedOrigins } from './config/corsOrigins.js';
+
 export function createApp() {
   const app = express();
 
@@ -41,32 +43,8 @@ export function createApp() {
     })
   );
 
-  // Always allow known Quantum product frontends, then merge CLIENT_URL / CORS_ORIGINS.
   // Passing an Error into the cors callback used to become a 500 because the
   // Express error handler ignored err.status — browsers on ai.* saw login 500s.
-  const allowedOrigins = [
-    ...new Set(
-      [
-        'http://localhost:5173',
-        'http://localhost:5174',
-        'http://localhost:5175',
-        'https://chat.quantumlogicslimited.com',
-        'https://ai.quantumlogicslimited.com',
-        'https://quantum-chat.vercel.app',
-        'https://quantum-chat-frontend.vercel.app',
-        'https://quantum-chat-frontend-mu.vercel.app',
-        'https://quantum-ai-frontend.vercel.app',
-        ...String(process.env.CLIENT_URL || '')
-          .split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-        ...String(process.env.CORS_ORIGINS || '')
-          .split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-      ]
-    ),
-  ];
   app.use(
     cors({
       origin(origin, callback) {
