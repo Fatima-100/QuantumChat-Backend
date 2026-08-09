@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Attachment from '../models/Attachment.js';
 import Group from '../models/Group.js';
 import PendingAttachmentUpload from '../models/PendingAttachmentUpload.js';
+import { allowedOrigins } from '../config/corsOrigins.js';
 import { getStorage, getStorageProviderName, newObjectName, MAX_ATTACHMENT_SIZE } from '../middleware/upload.js';
 import { areUsersBlocked } from './userController.js';
 
@@ -26,6 +27,11 @@ async function deleteKey(key) {
  */
 export async function initAttachmentUpload(req, res) {
   try {
+    // Google only enables CORS on a Drive resumable session for the Origin
+    // present when the session is created — forward the browser's so its
+    // follow-up direct PUT isn't blocked. Validate against our own allowlist
+    // since this value gets echoed back to Google as a trusted origin.
+    const origin = allowedOrigins.includes(req.headers.origin) ? req.headers.origin : undefined;
     const {
       recipientId,
       groupId,
@@ -119,7 +125,8 @@ export async function initAttachmentUpload(req, res) {
       recipientObjectName,
       pending.mimetype,
       numericSize,
-      req.user._id
+      req.user._id,
+      origin
     );
     pending.storageMode = recipientTarget.mode;
     pending.recipientObjectName = recipientObjectName;
@@ -134,7 +141,8 @@ export async function initAttachmentUpload(req, res) {
         senderObjectName,
         pending.mimetype,
         numericSize,
-        req.user._id
+        req.user._id,
+        origin
       );
       pending.senderObjectName = senderObjectName;
       data.sender = { mode: senderTarget.mode, uploadUrl: senderTarget.uploadUrl };
