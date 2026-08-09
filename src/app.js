@@ -2,12 +2,14 @@ import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
 import { authLimiter } from './middleware/rateLimiter.js';
+import { publicApiIpLimiter } from './middleware/apiKeyAuth.js';
 import attachmentRoutes from './routes/attachmentRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import callSignalRoutes from './routes/callSignalRoutes.js';
 import chatThemeRoutes from './routes/chatThemeRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
 import messageRoutes from './routes/messageRoutes.js';
+import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
@@ -53,7 +55,7 @@ export function createApp() {
         return callback(null, false);
       },
       methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-API-Key'],
       optionsSuccessStatus: 204,
     })
   );
@@ -75,6 +77,12 @@ export function createApp() {
   app.use('/api/trust', trustRoutes);
   app.use('/api/call-signals', callSignalRoutes);
   app.use('/api/chat-themes', chatThemeRoutes);
+  // Server-to-server integration surface for other QuantumLogics sites,
+  // authenticated with an X-API-Key header instead of a user JWT.
+  app.use('/api/public/v1', (req, res, next) => {
+    if (req.method === 'OPTIONS') return next();
+    return publicApiIpLimiter(req, res, next);
+  }, publicApiRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ success: false, error: 'Not found' });

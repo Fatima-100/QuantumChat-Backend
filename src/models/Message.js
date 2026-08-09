@@ -59,7 +59,7 @@ const messageSchema = new mongoose.Schema(
     readAt: { type: Date },
     kind: {
       type: String,
-      enum: ['text', 'announcement', 'poll', 'event', 'file', 'ai', 'ai_note'],
+      enum: ['text', 'announcement', 'poll', 'event', 'file', 'ai', 'ai_note', 'system'],
       default: 'text',
     },
     mentionedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

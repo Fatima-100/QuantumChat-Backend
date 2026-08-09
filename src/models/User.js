@@ -163,7 +163,7 @@ const userSchema = new mongoose.Schema(
     },
     systemRole: {
       type: String,
-      enum: ['quantum_ai'],
+      enum: ['quantum_ai', 'quantum_logics'],
       immutable: true,
     },
     verified: {
