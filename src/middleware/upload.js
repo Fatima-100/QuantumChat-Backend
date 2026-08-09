@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import multer from 'multer';
 import path from 'path';
-import { getStorage } from '../storage/index.js';
+import { getStorage, getStorageProviderName } from '../storage/index.js';
 
 /** Raster images only — SVG is rejected (scriptable when opened as a document). */
 export const SAFE_IMAGE_MIMES = new Set([
@@ -39,9 +39,14 @@ function rasterImageFilter(label) {
 // Memory staging only — durable blobs go to Google Drive via getStorage().
 const memory = multer.memoryStorage();
 
+export const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+
+// Only used for the local/dev "proxy" upload path (see attachmentController.js
+// init/finalize) — Google Drive uploads go straight from the browser via a
+// resumable session URL and never pass through this server.
 export const upload = multer({
   storage: memory,
-  limits: { fileSize: 15 * 1024 * 1024 },
+  limits: { fileSize: MAX_ATTACHMENT_SIZE },
 });
 
 export const avatarUpload = multer({
@@ -96,5 +101,5 @@ export function newObjectName(prefix = '', ext = '') {
   return safePrefix ? `${safePrefix}/${base}` : base;
 }
 
-export { getStorage };
+export { getStorage, getStorageProviderName };
 

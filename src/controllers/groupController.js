@@ -392,10 +392,32 @@ export async function rejectJoinRequest(req, res) {
 
 export async function listGroups(req, res) {
   try {
-    const groups = await Group.find({ members: req.user._id })
-      .sort({ updatedAt: -1 })
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const cursor = req.query.cursor ? toObjectId(req.query.cursor) : null;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+    const filter = { members: req.user._id };
+    if (cursor) filter._id = { $lt: cursor };
+    if (q) {
+      filter.name = { $regex: q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+    }
+
+    const rows = await Group.find(filter)
+      .sort({ _id: -1 })
+      .limit(limit + 1)
       .populate('members', MEMBER_POPULATE);
-    res.json({ success: true, data: groups.map((g) => g.toPublicJSON()) });
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    res.json({
+      success: true,
+      data: page.map((g) => g.toPublicJSON()),
+      meta: {
+        hasMore,
+        nextCursor: page.length ? String(page[page.length - 1]._id) : null,
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

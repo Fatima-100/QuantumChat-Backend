@@ -1,13 +1,12 @@
-import User, { KEY_SET_SIZE } from '../models/User.js';
-import Group from '../models/Group.js';
-import Message from '../models/Message.js';
+import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Attachment from '../models/Attachment.js';
 import FriendRequest from '../models/FriendRequest.js';
-import mongoose from 'mongoose';
-import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
-import { toObjectId } from '../utils/toObjectId.js';
+import Group from '../models/Group.js';
+import Message from '../models/Message.js';
+import User, { KEY_SET_SIZE } from '../models/User.js';
 import { conversationKey } from '../utils/conversationKey.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
+import { toObjectId } from '../utils/toObjectId.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
@@ -36,19 +35,51 @@ export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
 }
 
 export async function listUsers(req, res) {
-  const blockedIds = (req.user.blockedUsers || []).map((id) => id);
-  const friendIds = new Set((req.user.friends || []).map((id) => String(id)));
-  const users = await User.find({
-    _id: { $nin: [req.user._id, ...blockedIds] },
-  }).select(PUBLIC_FIELDS);
-  const data = users
-    .filter(
-      (u) =>
-        friendIds.has(String(u._id)) ||
-        (u.privacy?.discoverable || 'everyone') !== 'nobody',
-    )
-    .map((u) => u.toPublicJSON());
-  res.json({ success: true, data });
+  try {
+    const blockedIds = (req.user.blockedUsers || []).map((id) => id);
+    const friendIds = new Set((req.user.friends || []).map((id) => String(id)));
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const cursor = req.query.cursor ? toObjectId(req.query.cursor) : null;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+    const filter = { _id: { $nin: [req.user._id, ...blockedIds] } };
+    if (cursor) filter._id.$gt = cursor;
+    if (q) {
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { username: { $regex: escaped, $options: 'i' } },
+        { displayName: { $regex: escaped, $options: 'i' } },
+      ];
+    }
+
+    const rows = await User.find(filter)
+      .sort({ _id: 1 })
+      .limit(limit + 1)
+      .select(PUBLIC_FIELDS);
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    const data = page
+      .filter(
+        (u) =>
+          friendIds.has(String(u._id)) ||
+          (u.privacy?.discoverable || 'everyone') !== 'nobody',
+      )
+      .map((u) => u.toPublicJSON());
+
+    res.json({
+      success: true,
+      data,
+      meta: {
+        hasMore,
+        nextCursor: page.length ? String(page[page.length - 1]._id) : null,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 }
 
 export async function getMe(req, res) {
@@ -148,6 +179,7 @@ function applyPrivacyPatch(user, privacy) {
   const readOk = ['everyone', 'friends', 'nobody'];
   const onlineStatusOk = ['everyone', 'friends', 'selected'];
   const whoOk = ['everyone', 'friends', 'friendsOfFriends'];
+  const storyOk = ['everyone', 'friends', 'nobody', 'selected']; 
   const discoverOk = ['everyone', 'nobody'];
 
   if (lastSeenOk.includes(privacy.lastSeen)) {
@@ -186,6 +218,19 @@ function applyPrivacyPatch(user, privacy) {
   }
   if (discoverOk.includes(privacy.discoverable)) {
     user.privacy.discoverable = privacy.discoverable;
+  }
+  // --- Story privacy (new) ---
+  if (storyOk.includes(privacy.story)) {
+    user.privacy.story = privacy.story;
+  }
+  if (Array.isArray(privacy.storyViewers)) {
+    const friendSet = new Set((user.friends || []).map((id) => String(id)));
+    const next = [];
+    for (const raw of privacy.storyViewers) {
+      const id = toObjectId(raw);
+      if (id && friendSet.has(String(id))) next.push(id);
+    }
+    user.privacy.storyViewers = next;
   }
 }
 export async function getNotificationSettings(req, res) {

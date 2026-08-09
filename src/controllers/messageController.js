@@ -462,8 +462,8 @@ export async function getConversation(req, res) {
       .sort({ createdAt: -1 })
       .limit(limit + 1)
       .populate('attachment', ATTACHMENT_POPULATE)
-      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
-
+      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt')
+      .lean();
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     page.reverse();
