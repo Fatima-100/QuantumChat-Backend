@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import DeviceSession from '../models/DeviceSession.js';
 import { isSealedEnvelope } from '../utils/callEnvelope.js';
 
 const onlineUsers = new Map(); // userId -> Set(socketId)
@@ -44,8 +45,19 @@ export function attachSocket(io) {
       if (!token) return next(new Error('Missing auth token'));
 
       const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      if (payload.purpose === '2fa') return next(new Error('2FA verification required'));
       const user = await User.findById(payload.id);
       if (!user) return next(new Error('User not found'));
+
+      if (payload.sessionId) {
+        const session = await DeviceSession.findOne({
+          user: user._id,
+          sessionId: String(payload.sessionId),
+          revokedAt: null,
+        });
+        if (!session) return next(new Error('Session revoked or invalid'));
+        socket.sessionId = session.sessionId;
+      }
 
       socket.userId = user._id.toString();
       socket.privacyOnline = user.privacy?.online !== 'nobody';

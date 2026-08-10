@@ -81,3 +81,16 @@ export const contactLookupLimiter = rateLimit({
     error: "Too many contact lookups, please try again shortly",
   },
 });
+
+/** Public device-link verify/claim endpoints — IP keyed to limit abuse. */
+export const deviceLinkPublicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  message: {
+    success: false,
+    error: "Too many pairing attempts, please try again shortly",
+  },
+});

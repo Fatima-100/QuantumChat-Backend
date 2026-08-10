@@ -35,6 +35,7 @@ export async function startTestServer(options = {}) {
       .filter(Boolean);
     io = new Server(server, { cors: { origin: allowedOrigins } });
     attachSocket(io);
+    app.set('io', io);
   }
 
   await new Promise((resolve) => server.listen(0, resolve));
@@ -77,10 +78,15 @@ export async function login(base, email, password) {
   const res = await fetch(`${base}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, deviceLabel: 'Test device' }),
   });
   const body = await res.json().catch(() => ({}));
-  return { status: res.status, body, token: body?.data?.token };
+  return {
+    status: res.status,
+    body,
+    token: body?.data?.token,
+    sessionId: body?.data?.sessionId,
+  };
 }
 
 export async function createGroup(base, token, { name, memberIds, description, visibility, joinPolicy }) {
