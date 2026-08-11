@@ -1022,9 +1022,12 @@ export async function sendGroupMessage(req, res) {
     group.updatedAt = new Date();
     await group.save();
 
-    const message = await Message.findById(created._id)
-      .populate('attachment', ATTACHMENT_POPULATE)
-      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt kind');
+    let message = created;
+    if (attachmentId || replyToId) {
+      message = await Message.findById(created._id)
+        .populate('attachment', ATTACHMENT_POPULATE)
+        .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt kind');
+    }
     const payload = toClientMessage(message);
     const io = req.app.get('io');
     emitToMembers(io, [...memberSet], 'message:new', payload);

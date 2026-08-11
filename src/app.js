@@ -1,16 +1,16 @@
-import express from 'express';
 import cors from 'cors';
+import express from 'express';
 import helmet from 'helmet';
-import authRoutes from './routes/authRoutes.js';
-import userRoutes from './routes/userRoutes.js';
-import messageRoutes from './routes/messageRoutes.js';
+import { authLimiter } from './middleware/rateLimiter.js';
 import attachmentRoutes from './routes/attachmentRoutes.js';
+import authRoutes from './routes/authRoutes.js';
+import callSignalRoutes from './routes/callSignalRoutes.js';
+import chatThemeRoutes from './routes/chatThemeRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
+import messageRoutes from './routes/messageRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
-import callSignalRoutes from './routes/callSignalRoutes.js';
-import { authLimiter } from './middleware/rateLimiter.js';
-
+import userRoutes from './routes/userRoutes.js';
 export function createApp() {
   const app = express();
 
@@ -79,6 +79,7 @@ export function createApp() {
       optionsSuccessStatus: 204,
     })
   );
+
   app.use(express.json({ limit: '100kb' }));
 
   app.get('/api/health', (req, res) => res.json({ success: true, data: { status: 'ok' } }));
@@ -95,6 +96,7 @@ export function createApp() {
   app.use('/api/stories', storyRoutes);
   app.use('/api/trust', trustRoutes);
   app.use('/api/call-signals', callSignalRoutes);
+  app.use('/api/chat-themes', chatThemeRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ success: false, error: 'Not found' });

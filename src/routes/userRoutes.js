@@ -13,6 +13,7 @@ import {
   exportAccountData,
   deleteAccount,
   discoverUsers,
+  lookupContact,
   listFriends,
   listFriendRequests,
   sendFriendRequest,
@@ -23,6 +24,10 @@ import {
   getMe,
   getMyPublicKeys,
   updatePrivacy,
+  getNotificationSettings,
+  updateNotificationSettings,
+  muteChat,
+  unmuteChat,
 } from '../controllers/userController.js';
 import {
   getPushVapidPublicKey,
@@ -34,7 +39,7 @@ import { getVault, putVault, deleteVault } from '../controllers/vaultController.
 import { createAiCapsule, listAiCapsules } from '../controllers/capsuleController.js';
 import { requireAuth } from '../middleware/auth.js';
 import { avatarUpload } from '../middleware/upload.js';
-import { apiLimiter } from '../middleware/rateLimiter.js';
+import { apiLimiter, contactLookupLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
 
@@ -46,6 +51,10 @@ router.get('/me/public-keys', getMyPublicKeys);
 router.patch('/me', updateProfile);
 router.patch('/me/privacy', updatePrivacy);
 router.patch('/me/public-keys', updatePublicKeys);
+router.get('/me/notification-settings', getNotificationSettings);
+router.put('/me/notification-settings', updateNotificationSettings);
+router.post('/me/mute', muteChat);
+router.post('/me/unmute', unmuteChat);
 router.get('/me/blocked', listBlockedUsers);
 router.get('/me/export', exportAccountData);
 router.delete('/me', deleteAccount);
@@ -56,7 +65,6 @@ router.delete('/me/sessions/:sessionId', revokeSession);
 router.get('/me/vault', getVault);
 router.put('/me/vault', putVault);
 router.delete('/me/vault', deleteVault);
-router.get('/me', getMe);
 router.post('/me/ai-capsules', createAiCapsule);
 router.get('/me/ai-capsules', listAiCapsules);
 router.get('/me/push/vapid-public-key', getPushVapidPublicKey);
@@ -66,6 +74,7 @@ router.post('/:id/block', blockUser);
 router.delete('/:id/block', unblockUser);
 router.get('/:id/avatar', getAvatar);
 router.get('/discover', discoverUsers);
+router.get('/lookup', contactLookupLimiter, lookupContact);
 router.get('/friends', listFriends);
 router.get('/friend-requests', listFriendRequests);
 router.post('/friend-requests', sendFriendRequest);

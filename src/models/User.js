@@ -16,7 +16,72 @@ const privacySchema = new mongoose.Schema(
   },
   { _id: false }
 );
-
+const notificationSettingsSchema = new mongoose.Schema(
+  {
+    messageNotifications: {
+      type: String,
+      enum: ['all', 'direct_only', 'all_except_reactions'],
+      default: 'all',
+    },
+    statusNotifications: {
+      type: String,
+      enum: ['all', 'favorites_only', 'off'],
+      default: 'all',
+    },
+    soundEnabled: { type: Boolean, default: true },
+    soundVolume: { type: Number, min: 0, max: 100, default: 80 },
+    messagePreview: {
+      type: String,
+      enum: ['full', 'sender_only', 'hidden'],
+      default: 'full',
+    },
+    vibration: {
+      type: String,
+      enum: ['on', 'off', 'custom'],
+      default: 'on',
+    },
+    doNotDisturb: {
+      enabled: { type: Boolean, default: false },
+      startTime: { type: String, default: '22:00' },
+      endTime: { type: String, default: '07:00' },
+      allowedContacts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    },
+    groupNotifications: {
+      type: String,
+      enum: ['all', 'mentions_only', 'important_only', 'off'],
+      default: 'all',
+    },
+    callNotifications: {
+      voiceCallEnabled: { type: Boolean, default: true },
+      videoCallEnabled: { type: Boolean, default: true },
+      vibrateOnCall: { type: Boolean, default: true },
+      missedCallReminders: { type: Boolean, default: true },
+    },
+    badgeCount: {
+      type: String,
+      enum: ['show', 'hidden'],
+      default: 'show',
+    },
+    webNotifications: {
+      enabled: { type: Boolean, default: true },
+      soundOnWeb: { type: Boolean, default: true },
+      syncReadAcrossDevices: { type: Boolean, default: true },
+    },
+    priority: {
+      type: String,
+      enum: ['high', 'normal', 'silent'],
+      default: 'normal',
+    },
+  },
+  { _id: false }
+);
+const mutedChatSchema = new mongoose.Schema(
+  {
+    conversationKey: { type: String, required: true },
+    expiresAt: { type: Date, default: null }, // null = muted forever ("Always")
+  },
+  { _id: false }
+);
 const userSchema = new mongoose.Schema(
   {
     username: {
@@ -103,6 +168,14 @@ const userSchema = new mongoose.Schema(
     privacy: {
       type: privacySchema,
       default: () => ({}),
+    },
+    notificationSettings: {
+      type: notificationSettingsSchema,
+      default: () => ({}),
+    },
+    mutedChats: {
+      type: [mutedChatSchema],
+      default: [],
     },
     blockedUsers: [
   {
@@ -225,6 +298,11 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     lastLoginAt: this.lastLoginAt,
     blockedUsers: Array.isArray(this.blockedUsers) ? this.blockedUsers.map((id) => String(id)) : [],
     friends: Array.isArray(this.friends) ? this.friends.map((id) => String(id)) : [],   // ← add this line
+    notificationSettings: this.notificationSettings || {},
+    mutedChats: Array.isArray(this.mutedChats) ? this.mutedChats.map((m) => ({
+      conversationKey: m.conversationKey,
+      expiresAt: m.expiresAt,
+    })) : [],
     totpEnabled: Boolean(this.totpEnabled),
   };
 };
