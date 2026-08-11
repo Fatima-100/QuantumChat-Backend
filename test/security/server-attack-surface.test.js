@@ -62,18 +62,42 @@ before(async () => {
   assert.ok(storedMessage, 'setup: message document must exist in MongoDB');
 
   const sealedFile = sealBytes(Buffer.from('a file only alice and bob should see'), bob.keySet[0].publicKey);
-  const form = new FormData();
-  form.append('file', new Blob([sealedFile.cipherBytes]), 'secret.txt');
-  form.append('recipientId', bob.user.id);
-  form.append('nonce', sealedFile.nonce);
-  form.append('ephemeralPublicKey', sealedFile.ephemeralPublicKey);
-  form.append('targetPublicKey', sealedFile.targetPublicKey);
-  const uploadRes = await fetch(`${ctx.base}/attachments`, {
+
+  // Three-step flow (see attachmentController.js): init validates + hands
+  // back an upload target, bytes are proxied through us in test mode
+  // (MemoryStorageAdapter has no direct-from-browser upload target), then
+  // finalize creates the Attachment record.
+  const initRes = await fetch(`${ctx.base}/attachments/init`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${alice.token}` },
-    body: form,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({
+      recipientId: bob.user.id,
+      filename: 'secret.txt',
+      mimetype: 'text/plain',
+      size: sealedFile.cipherBytes.length,
+      nonce: sealedFile.nonce,
+      ephemeralPublicKey: sealedFile.ephemeralPublicKey,
+      targetPublicKey: sealedFile.targetPublicKey,
+    }),
   }).then((r) => r.json());
-  assert.equal(uploadRes.success, true, `setup: attachment upload must succeed (${uploadRes.error})`);
+  assert.equal(initRes.success, true, `setup: attachment init must succeed (${initRes.error})`);
+  assert.equal(initRes.data.recipient.mode, 'proxy', 'test storage must use the proxy upload path');
+
+  const bytesForm = new FormData();
+  bytesForm.append('file', new Blob([sealedFile.cipherBytes]), 'secret.txt');
+  const bytesRes = await fetch(`${ctx.base}/attachments/pending/${initRes.data.pendingUploadId}/bytes?slot=recipient`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${alice.token}` },
+    body: bytesForm,
+  }).then((r) => r.json());
+  assert.equal(bytesRes.success, true, `setup: attachment bytes upload must succeed (${bytesRes.error})`);
+
+  const uploadRes = await fetch(`${ctx.base}/attachments/finalize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${alice.token}` },
+    body: JSON.stringify({ pendingUploadId: initRes.data.pendingUploadId }),
+  }).then((r) => r.json());
+  assert.equal(uploadRes.success, true, `setup: attachment finalize must succeed (${uploadRes.error})`);
   sharedAttachmentId = uploadRes.data.id;
 
   // Stash for the attachment decrypt test below.

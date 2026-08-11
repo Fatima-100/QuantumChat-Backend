@@ -1,13 +1,12 @@
-import User, { KEY_SET_SIZE } from '../models/User.js';
-import Group from '../models/Group.js';
-import Message from '../models/Message.js';
+import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Attachment from '../models/Attachment.js';
 import FriendRequest from '../models/FriendRequest.js';
-import mongoose from 'mongoose';
-import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
-import { toObjectId } from '../utils/toObjectId.js';
+import Group from '../models/Group.js';
+import Message from '../models/Message.js';
+import User, { KEY_SET_SIZE } from '../models/User.js';
 import { conversationKey } from '../utils/conversationKey.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
+import { toObjectId } from '../utils/toObjectId.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
@@ -36,11 +35,51 @@ export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
 }
 
 export async function listUsers(req, res) {
-  const blockedIds = (req.user.blockedUsers || []).map((id) => id);
-  const users = await User.find({
-    _id: { $nin: [req.user._id, ...blockedIds] },
-  }).select(PUBLIC_FIELDS);
-  res.json({ success: true, data: users.map((u) => u.toPublicJSON(req.user._id)) });
+  try {
+    const blockedIds = (req.user.blockedUsers || []).map((id) => id);
+    const friendIds = new Set((req.user.friends || []).map((id) => String(id)));
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+    const cursor = req.query.cursor ? toObjectId(req.query.cursor) : null;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+    const filter = { _id: { $nin: [req.user._id, ...blockedIds] } };
+    if (cursor) filter._id.$gt = cursor;
+    if (q) {
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { username: { $regex: escaped, $options: 'i' } },
+        { displayName: { $regex: escaped, $options: 'i' } },
+      ];
+    }
+
+    const rows = await User.find(filter)
+      .sort({ _id: 1 })
+      .limit(limit + 1)
+      .select(PUBLIC_FIELDS);
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    const data = page
+      .filter(
+        (u) =>
+          friendIds.has(String(u._id)) ||
+          (u.privacy?.discoverable || 'everyone') !== 'nobody',
+      )
+      .map((u) => u.toPublicJSON());
+
+    res.json({
+      success: true,
+      data,
+      meta: {
+        hasMore,
+        nextCursor: page.length ? String(page[page.length - 1]._id) : null,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 }
 
 export async function getMe(req, res) {
@@ -79,67 +118,48 @@ export async function updatePrivacy(req, res) {
       onlineStatusVisibleTo,
       whoCanMessage,
       discoverable,
+      story,
+      storyViewers,
     } = req.body || {};
 
+    if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
+      return res.status(400).json({ success: false, error: 'Invalid lastSeen privacy setting' });
+    }
+    if (
+      readReceipts !== undefined &&
+      typeof readReceipts !== 'boolean' &&
+      !['everyone', 'friends', 'nobody'].includes(readReceipts)
+    ) {
+      return res.status(400).json({ success: false, error: 'Invalid readReceipts privacy setting' });
+    }
+    if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
+      return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
+    }
+    if (onlineStatusVisibleTo !== undefined && !Array.isArray(onlineStatusVisibleTo)) {
+      return res.status(400).json({ success: false, error: 'onlineStatusVisibleTo must be an array of user IDs' });
+    }
+    if (whoCanMessage !== undefined && !['everyone', 'friends', 'friendsOfFriends'].includes(whoCanMessage)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanMessage privacy setting' });
+    }
+    if (discoverable !== undefined && !['everyone', 'nobody'].includes(discoverable)) {
+      return res.status(400).json({ success: false, error: 'Invalid discoverable privacy setting' });
+    }
+    if (story !== undefined && !['everyone', 'friends', 'nobody', 'selected'].includes(story)) {
+      return res.status(400).json({ success: false, error: 'Invalid story privacy setting' });
+    }
+    if (storyViewers !== undefined && !Array.isArray(storyViewers)) {
+      return res.status(400).json({ success: false, error: 'storyViewers must be an array of user IDs' });
+    }
+
     const user = req.user;
-    user.privacy = user.privacy || {};
-
-    if (lastSeen !== undefined) {
-      if (!['everyone', 'friends', 'nobody'].includes(lastSeen)) {
-        return res.status(400).json({ success: false, error: 'Invalid lastSeen privacy setting' });
-      }
-      user.privacy.lastSeen = lastSeen;
-    }
-
-    if (readReceipts !== undefined) {
-      if (!['everyone', 'friends', 'nobody'].includes(readReceipts)) {
-        return res.status(400).json({ success: false, error: 'Invalid readReceipts privacy setting' });
-      }
-      user.privacy.readReceipts = readReceipts;
-    }
-
-    if (onlineStatus !== undefined) {
-      if (!['everyone', 'friends', 'selected'].includes(onlineStatus)) {
-        return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
-      }
-      user.privacy.onlineStatus = onlineStatus;
-    }
-
-    if (onlineStatusVisibleTo !== undefined) {
-      if (!Array.isArray(onlineStatusVisibleTo)) {
-        return res.status(400).json({ success: false, error: 'onlineStatusVisibleTo must be an array of user IDs' });
-      }
-      const validIds = [];
-      for (const idStr of onlineStatusVisibleTo) {
-        const oid = toObjectId(idStr);
-        if (!oid) {
-          return res.status(400).json({ success: false, error: 'Invalid user ID in onlineStatusVisibleTo' });
-        }
-        validIds.push(oid);
-      }
-      user.privacy.onlineStatusVisibleTo = validIds;
-    }
-
-    if (whoCanMessage !== undefined) {
-      if (!['everyone', 'friends', 'friendsOfFriends'].includes(whoCanMessage)) {
-        return res.status(400).json({ success: false, error: 'Invalid whoCanMessage privacy setting' });
-      }
-      user.privacy.whoCanMessage = whoCanMessage;
-    }
-
-    if (discoverable !== undefined) {
-      if (!['everyone', 'nobody'].includes(discoverable)) {
-        return res.status(400).json({ success: false, error: 'Invalid discoverable privacy setting' });
-      }
-      user.privacy.discoverable = discoverable;
-    }
-
+    applyPrivacyPatch(user, req.body || {});
     user.markModified('privacy');
     await user.save();
-    const updatedSelf = user.toSelfJSON();
-    res.json({ success: true, data: updatedSelf.privacy, user: updatedSelf });
+    const self = user.toSelfJSON();
+    res.json({ success: true, data: self.privacy, user: self });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 }
 
@@ -182,36 +202,76 @@ export async function updateProfile(req, res) {
       user.phone = normalized;
     }
     if (privacy && typeof privacy === 'object') {
-      user.privacy = user.privacy || {};
-      if (['everyone', 'friends', 'nobody'].includes(privacy.lastSeen)) {
-        user.privacy.lastSeen = privacy.lastSeen;
-      }
-      if (['everyone', 'friends', 'nobody'].includes(privacy.readReceipts)) {
-        user.privacy.readReceipts = privacy.readReceipts;
-      } else if (typeof privacy.readReceipts === 'boolean') {
-        user.privacy.readReceipts = privacy.readReceipts ? 'everyone' : 'nobody';
-      }
-      if (['everyone', 'friends', 'selected'].includes(privacy.onlineStatus)) {
-        user.privacy.onlineStatus = privacy.onlineStatus;
-      } else if (['everyone', 'nobody'].includes(privacy.online)) {
-        user.privacy.onlineStatus = privacy.online === 'nobody' ? 'selected' : 'everyone';
-      }
-      if (Array.isArray(privacy.onlineStatusVisibleTo)) {
-        user.privacy.onlineStatusVisibleTo = privacy.onlineStatusVisibleTo.map(toObjectId).filter(Boolean);
-      }
-      if (['everyone', 'friends', 'friendsOfFriends'].includes(privacy.whoCanMessage)) {
-        user.privacy.whoCanMessage = privacy.whoCanMessage;
-      }
-      if (['everyone', 'nobody'].includes(privacy.discoverable)) {
-        user.privacy.discoverable = privacy.discoverable;
-      }
-      user.markModified('privacy');
+      applyPrivacyPatch(user, privacy);
     }
 
     await user.save();
     res.json({ success: true, data: user.toSelfJSON() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+function applyPrivacyPatch(user, privacy) {
+  if (!privacy || typeof privacy !== 'object') return;
+  user.privacy = user.privacy || {};
+
+  const lastSeenOk = ['everyone', 'friends', 'nobody'];
+  const readOk = ['everyone', 'friends', 'nobody'];
+  const onlineStatusOk = ['everyone', 'friends', 'selected'];
+  const whoOk = ['everyone', 'friends', 'friendsOfFriends'];
+  const storyOk = ['everyone', 'friends', 'nobody', 'selected']; 
+  const discoverOk = ['everyone', 'nobody'];
+
+  if (lastSeenOk.includes(privacy.lastSeen)) {
+    user.privacy.lastSeen = privacy.lastSeen;
+  }
+
+  if (typeof privacy.readReceipts === 'boolean') {
+    user.privacy.readReceipts = privacy.readReceipts ? 'everyone' : 'nobody';
+  } else if (readOk.includes(privacy.readReceipts)) {
+    user.privacy.readReceipts = privacy.readReceipts;
+  }
+
+  if (onlineStatusOk.includes(privacy.onlineStatus)) {
+    user.privacy.onlineStatus = privacy.onlineStatus;
+    // Presence still broadcasts; consumers should honor onlineStatus / visibleTo.
+    user.privacy.online = 'everyone';
+  } else if (privacy.online === 'everyone' || privacy.online === 'nobody') {
+    user.privacy.online = privacy.online;
+    if (!user.privacy.onlineStatus) {
+      user.privacy.onlineStatus = privacy.online === 'nobody' ? 'selected' : 'everyone';
+    }
+  }
+
+  if (Array.isArray(privacy.onlineStatusVisibleTo)) {
+    const friendSet = new Set((user.friends || []).map((id) => String(id)));
+    const next = [];
+    for (const raw of privacy.onlineStatusVisibleTo) {
+      const id = toObjectId(raw);
+      if (id && friendSet.has(String(id))) next.push(id);
+    }
+    user.privacy.onlineStatusVisibleTo = next;
+  }
+
+  if (whoOk.includes(privacy.whoCanMessage)) {
+    user.privacy.whoCanMessage = privacy.whoCanMessage;
+  }
+  if (discoverOk.includes(privacy.discoverable)) {
+    user.privacy.discoverable = privacy.discoverable;
+  }
+  // --- Story privacy (new) ---
+  if (storyOk.includes(privacy.story)) {
+    user.privacy.story = privacy.story;
+  }
+  if (Array.isArray(privacy.storyViewers)) {
+    const friendSet = new Set((user.friends || []).map((id) => String(id)));
+    const next = [];
+    for (const raw of privacy.storyViewers) {
+      const id = toObjectId(raw);
+      if (id && friendSet.has(String(id))) next.push(id);
+    }
+    user.privacy.storyViewers = next;
   }
 }
 export async function getNotificationSettings(req, res) {
@@ -589,7 +649,7 @@ export async function discoverUsers(req, res) {
       (u) =>
         !blockedIds.includes(String(u._id)) &&
         !friendIds.includes(String(u._id)) &&
-        u.privacy?.discoverable !== 'nobody'
+        (u.privacy?.discoverable || 'everyone') !== 'nobody'
     );
     const candidateIds = candidates.map((u) => u._id);
 

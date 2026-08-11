@@ -2,15 +2,19 @@ import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
 import { authLimiter } from './middleware/rateLimiter.js';
+import { publicApiIpLimiter } from './middleware/apiKeyAuth.js';
 import attachmentRoutes from './routes/attachmentRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import callSignalRoutes from './routes/callSignalRoutes.js';
 import chatThemeRoutes from './routes/chatThemeRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
 import messageRoutes from './routes/messageRoutes.js';
+import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
+import { allowedOrigins } from './config/corsOrigins.js';
+
 export function createApp() {
   const app = express();
 
@@ -41,32 +45,8 @@ export function createApp() {
     })
   );
 
-  // Always allow known Quantum product frontends, then merge CLIENT_URL / CORS_ORIGINS.
   // Passing an Error into the cors callback used to become a 500 because the
   // Express error handler ignored err.status — browsers on ai.* saw login 500s.
-  const allowedOrigins = [
-    ...new Set(
-      [
-        'http://localhost:5173',
-        'http://localhost:5174',
-        'http://localhost:5175',
-        'https://chat.quantumlogicslimited.com',
-        'https://ai.quantumlogicslimited.com',
-        'https://quantum-chat.vercel.app',
-        'https://quantum-chat-frontend.vercel.app',
-        'https://quantum-chat-frontend-mu.vercel.app',
-        'https://quantum-ai-frontend.vercel.app',
-        ...String(process.env.CLIENT_URL || '')
-          .split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-        ...String(process.env.CORS_ORIGINS || '')
-          .split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-      ]
-    ),
-  ];
   app.use(
     cors({
       origin(origin, callback) {
@@ -75,7 +55,7 @@ export function createApp() {
         return callback(null, false);
       },
       methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-API-Key'],
       optionsSuccessStatus: 204,
     })
   );
@@ -97,6 +77,12 @@ export function createApp() {
   app.use('/api/trust', trustRoutes);
   app.use('/api/call-signals', callSignalRoutes);
   app.use('/api/chat-themes', chatThemeRoutes);
+  // Server-to-server integration surface for other QuantumLogics sites,
+  // authenticated with an X-API-Key header instead of a user JWT.
+  app.use('/api/public/v1', (req, res, next) => {
+    if (req.method === 'OPTIONS') return next();
+    return publicApiIpLimiter(req, res, next);
+  }, publicApiRoutes);
 
   app.use((req, res) => {
     res.status(404).json({ success: false, error: 'Not found' });

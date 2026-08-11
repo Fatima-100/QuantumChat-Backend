@@ -4,6 +4,7 @@ import {
   getUser,
   updatePublicKeys,
   updateProfile,
+  updatePrivacy,
   blockUser,
   unblockUser,
   listBlockedUsers,

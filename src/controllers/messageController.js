@@ -35,6 +35,53 @@ function normalizeEnvelope(envelope) {
   };
 }
 
+function allowsReadReceipts(privacy) {
+  const value = privacy?.readReceipts;
+  if (value === false || value === 'nobody') return false;
+  return true;
+}
+
+async function assertCanDirectMessage(senderId, recipientId) {
+  const recipientOid = toObjectId(recipientId);
+  const senderOid = toObjectId(senderId);
+  if (!recipientOid || !senderOid) {
+    const err = new Error('Invalid recipient id');
+    err.status = 400;
+    throw err;
+  }
+  if (String(senderOid) === String(recipientOid)) return;
+  const recipient = await User.findById(recipientOid).select('privacy friends');
+  if (!recipient) {
+    const err = new Error('Recipient not found');
+    err.status = 404;
+    throw err;
+  }
+  const policy = recipient.privacy?.whoCanMessage || 'everyone';
+  if (policy === 'everyone') return;
+
+  const recipientFriends = (recipient.friends || []).map(String);
+  const senderIsFriend = recipientFriends.includes(String(senderOid));
+  if (policy === 'friends') {
+    if (!senderIsFriend) {
+      const err = new Error('This user is not accepting messages from friends');
+      err.status = 403;
+      throw err;
+    }
+    return;
+  }
+  if (policy === 'friendsOfFriends') {
+    if (senderIsFriend) return;
+    const sender = await User.findById(senderOid).select('friends');
+    const senderFriends = new Set((sender?.friends || []).map(String));
+    const mutual = recipientFriends.some((id) => senderFriends.has(id));
+    if (!mutual) {
+      const err = new Error('This user is not accepting messages from friends of friends');
+      err.status = 403;
+      throw err;
+    }
+  }
+}
+
 function toClientMessage(doc) {
   const message = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
   message.id = message._id;
@@ -241,58 +288,6 @@ export async function checkForwardAllowed(req, res) {
   }
 }
 
-async function canUserMessageTarget(senderId, recipientId) {
-  const recipientOid = toObjectId(recipientId);
-  const senderOid = toObjectId(senderId);
-  if (!recipientOid || !senderOid) return false;
-
-  const recipient = await User.findById(recipientOid).select('privacy friends isSystemUser');
-  if (!recipient) return true;
-  if (recipient.isSystemUser) return true;
-
-  const setting = recipient.privacy?.whoCanMessage || 'everyone';
-  if (setting === 'everyone') return true;
-
-  const recipientFriendIds = (recipient.friends || []).map((f) => String(f._id || f));
-  const sId = String(senderOid);
-
-  const isDirectFriend = recipientFriendIds.includes(sId);
-  if (setting === 'friends') {
-    return isDirectFriend;
-  }
-
-  if (setting === 'friendsOfFriends') {
-    if (isDirectFriend) return true;
-    const sender = await User.findById(senderOid).select('friends');
-    if (!sender) return false;
-    const senderFriendIds = new Set((sender.friends || []).map((f) => String(f._id || f)));
-    for (const fId of recipientFriendIds) {
-      if (senderFriendIds.has(fId)) return true;
-    }
-    return false;
-  }
-
-  return true;
-}
-
-function canSendReadReceipt(readerUser, peerId) {
-  const setting = readerUser.privacy?.readReceipts;
-  let val = 'everyone';
-  if (typeof setting === 'boolean') {
-    val = setting ? 'everyone' : 'nobody';
-  } else if (setting) {
-    val = setting;
-  }
-
-  if (val === 'everyone') return true;
-  if (val === 'nobody') return false;
-  if (val === 'friends') {
-    const friends = (readerUser.friends || []).map((f) => String(f._id || f));
-    return friends.includes(String(peerId));
-  }
-  return true;
-}
-
 export async function sendMessage(req, res) {
   try {
     const {
@@ -321,9 +316,7 @@ export async function sendMessage(req, res) {
     if (await areUsersBlocked(req.user._id, to, req.user.blockedUsers)) {
       return res.status(403).json({ success: false, error: 'Cannot message a blocked user' });
     }
-    if (!(await canUserMessageTarget(req.user._id, to))) {
-      return res.status(403).json({ success: false, error: "This user isn't accepting messages from you right now" });
-    }
+    await assertCanDirectMessage(req.user._id, to);
 
     const expiresAt = resolveExpiresAt(expiresInSeconds);
     if (expiresAt === null) {
@@ -358,12 +351,18 @@ export async function sendMessage(req, res) {
         .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
     }
     const payload = toClientMessage(message);
+    const isSelfChat = String(to) === String(req.user._id);
 
     const io = req.app.get('io');
-    if (io) io.to(to.toString()).emit('message:new', payload);
-    if (io) io.to(req.user._id.toString()).emit('message:new', payload);
+    if (io) {
+      io.to(to.toString()).emit('message:new', payload);
+      // Self-notes: room is the same — don't emit twice.
+      if (!isSelfChat) {
+        io.to(req.user._id.toString()).emit('message:new', payload);
+      }
+    }
 
-    if (!isUserOnline(to)) {
+    if (!isSelfChat && !isUserOnline(to)) {
       notifyUser(to, { title: 'QuantumChat', body: 'New message' }).catch(() => {});
     }
 
@@ -463,8 +462,8 @@ export async function getConversation(req, res) {
       .sort({ createdAt: -1 })
       .limit(limit + 1)
       .populate('attachment', ATTACHMENT_POPULATE)
-      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
-
+      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt')
+      .lean();
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     page.reverse();
@@ -472,7 +471,7 @@ export async function getConversation(req, res) {
     const now = new Date();
     const deliveredIds = [];
     const readIds = [];
-    const allowReadReceipts = canSendReadReceipt(req.user, peerOid);
+    const allowReadReceipts = allowsReadReceipts(req.user.privacy);
     for (const msg of page) {
       if (String(msg.from) === String(userId) && String(msg.to) === String(req.user._id)) {
         if (!msg.deliveredAt) {
@@ -610,7 +609,7 @@ export async function markConversationRead(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid user id' });
     }
     const now = new Date();
-    if (!canSendReadReceipt(req.user, userId)) {
+    if (!allowsReadReceipts(req.user.privacy)) {
       const delivered = await Message.updateMany(
         { from: userId, to: req.user._id, deliveredAt: null },
         { $set: { deliveredAt: now } }

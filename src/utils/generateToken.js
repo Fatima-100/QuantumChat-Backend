@@ -1,9 +1,13 @@
 import jwt from 'jsonwebtoken';
 
-export function generateToken(userId) {
+function resolveExpiresIn(expiresIn) {
+  return expiresIn || process.env.JWT_EXPIRES_IN || '30d';
+}
+
+export function generateToken(userId, options = {}) {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
     algorithm: 'HS256',
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    expiresIn: resolveExpiresIn(options.expiresIn),
   });
 }
 
@@ -17,4 +21,8 @@ export function generate2faTempToken(userId) {
 
 export function verifyToken(token) {
   return jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+}
+
+export function rememberMeExpiresIn() {
+  return process.env.JWT_REMEMBER_EXPIRES_IN || '90d';
 }

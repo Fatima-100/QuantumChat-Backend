@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import path from 'path';
+import { getStorage, isSafeImageMime, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Story from '../models/Story.js';
-import { getStorage, newObjectName, isSafeImageMime, safeImageContentType } from '../middleware/upload.js';
 import { areUsersBlocked } from './userController.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
@@ -111,6 +111,33 @@ export async function createStory(req, res) {
           success: false,
           error: 'Sealed stories must include an envelope for the author',
         });
+      }
+
+      // --- Story privacy enforcement (new) ---
+      // Reject envelopes for viewers outside the author's configured story
+      // audience. Clients build the envelope list themselves, so this can't
+      // be trusted without a server-side check.
+      const storyPrivacy = req.user.privacy?.story || 'everyone';
+      if (storyPrivacy !== 'everyone') {
+        const authorId = String(req.user._id);
+        const friendSet = new Set((req.user.friends || []).map((id) => String(id)));
+        const selectedSet = new Set(
+          (req.user.privacy?.storyViewers || []).map((id) => String(id))
+        );
+        const disallowed = envelopes.find((e) => {
+          const viewerId = String(e.user);
+          if (viewerId === authorId) return false;
+          if (storyPrivacy === 'nobody') return true;
+          if (storyPrivacy === 'friends') return !friendSet.has(viewerId);
+          if (storyPrivacy === 'selected') return !selectedSet.has(viewerId);
+          return false;
+        });
+        if (disallowed) {
+          return res.status(400).json({
+            success: false,
+            error: 'Story envelopes include a viewer outside your story privacy audience',
+          });
+        }
       }
       contentIv = typeof req.body.contentIv === 'string' ? req.body.contentIv.slice(0, 128) : '';
       if (!contentIv) {

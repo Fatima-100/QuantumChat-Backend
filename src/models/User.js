@@ -1,18 +1,43 @@
-import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 export const KEY_SET_SIZE = 5;
 
 const privacySchema = new mongoose.Schema(
   {
-    lastSeen: { type: String, enum: ['everyone', 'friends', 'nobody'], default: 'everyone' },
-    readReceipts: { type: String, enum: ['everyone', 'friends', 'nobody'], default: 'everyone' },
-    onlineStatus: { type: String, enum: ['everyone', 'friends', 'selected'], default: 'everyone' },
+    lastSeen: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    /** Legacy presence gate used by sockets (`everyone` | `nobody`). */
+    online: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
+    onlineStatus: {
+      type: String,
+      enum: ['everyone', 'friends', 'selected'],
+      default: 'everyone',
+    },
     onlineStatusVisibleTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-    whoCanMessage: { type: String, enum: ['everyone', 'friends', 'friendsOfFriends'], default: 'everyone' },
-    discoverable: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
+    /** Boolean (legacy) or `everyone` | `friends` | `nobody`. */
+    readReceipts: { type: mongoose.Schema.Types.Mixed, default: 'everyone' },
+    whoCanMessage: {
+      type: String,
+      enum: ['everyone', 'friends', 'friendsOfFriends'],
+      default: 'everyone',
+    },
+    discoverable: {
+      type: String,
+      enum: ['everyone', 'nobody'],
+      default: 'everyone',
+    },
+    story: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody', 'selected'],
+      default: 'everyone',
+    },
+    storyViewers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   },
   { _id: false }
 );
@@ -138,7 +163,7 @@ const userSchema = new mongoose.Schema(
     },
     systemRole: {
       type: String,
-      enum: ['quantum_ai'],
+      enum: ['quantum_ai', 'quantum_logics'],
       immutable: true,
     },
     verified: {
@@ -252,17 +277,17 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     }
   }
 
-  let readReceiptsVal = 'everyone';
-  if (typeof privacy.readReceipts === 'boolean') {
-    readReceiptsVal = privacy.readReceipts ? 'everyone' : 'nobody';
-  } else if (privacy.readReceipts) {
-    readReceiptsVal = privacy.readReceipts;
+  let readReceipts = privacy.readReceipts;
+  if (typeof readReceipts === 'boolean') {
+    readReceipts = readReceipts ? 'everyone' : 'nobody';
+  } else if (!['everyone', 'friends', 'nobody'].includes(readReceipts)) {
+    readReceipts = 'everyone';
   }
 
-  let onlineStatusVal = privacy.onlineStatus;
-  if (!onlineStatusVal) {
-    onlineStatusVal = privacy.online === 'nobody' ? 'selected' : (privacy.online || 'everyone');
-  }
+  const onlineStatus =
+    privacy.onlineStatus ||
+    (privacy.online === 'nobody' ? 'selected' : privacy.online) ||
+    'everyone';
 
   return {
     id: this._id,
@@ -274,14 +299,19 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     lastLoginAt: showLastSeen ? this.lastLoginAt : null,
     hasAvatar: Boolean(this.avatarPath),
     privacy: {
-      lastSeen: lastSeenSetting,
-      readReceipts: readReceiptsVal,
-      onlineStatus: onlineStatusVal,
+      lastSeen: privacy.lastSeen || 'everyone',
+      online: privacy.online || 'everyone',
+      onlineStatus,
       onlineStatusVisibleTo: Array.isArray(privacy.onlineStatusVisibleTo)
         ? privacy.onlineStatusVisibleTo.map((id) => String(id._id || id))
         : [],
+      readReceipts,
       whoCanMessage: privacy.whoCanMessage || 'everyone',
       discoverable: privacy.discoverable || 'everyone',
+      story: privacy.story || 'everyone',
+      storyViewers: Array.isArray(privacy.storyViewers)
+        ? privacy.storyViewers.map((id) => String(id._id || id))
+        : [],
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
