@@ -24,7 +24,6 @@ import {
   removeFriend,
   getMe,
   getMyPublicKeys,
-  updatePrivacy,
   getNotificationSettings,
   updateNotificationSettings,
   muteChat,
