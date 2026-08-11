@@ -36,7 +36,7 @@ export async function ensureQuantumAIUser() {
       isSystemUser: true,
       systemRole: 'quantum_ai',
       verified: true,
-      privacy: { lastSeen: 'nobody', online: 'nobody', readReceipts: false },
+      privacy: { lastSeen: 'nobody', onlineStatus: 'selected', readReceipts: 'nobody' },
     });
   } catch (error) {
     if (error?.code === 11000) {
