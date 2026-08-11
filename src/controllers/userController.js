@@ -106,8 +106,63 @@ export async function getUser(req, res) {
   if (await areUsersBlocked(req.user._id, user._id)) {
     return res.status(403).json({ success: false, error: 'User is blocked' });
   }
-  res.json({ success: true, data: user.toPublicJSON() });
+  res.json({ success: true, data: user.toPublicJSON(req.user._id) });
 }
+
+export async function updatePrivacy(req, res) {
+  try {
+    const {
+      lastSeen,
+      readReceipts,
+      onlineStatus,
+      onlineStatusVisibleTo,
+      whoCanMessage,
+      discoverable,
+      story,
+      storyViewers,
+    } = req.body || {};
+
+    if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
+      return res.status(400).json({ success: false, error: 'Invalid lastSeen privacy setting' });
+    }
+    if (
+      readReceipts !== undefined &&
+      typeof readReceipts !== 'boolean' &&
+      !['everyone', 'friends', 'nobody'].includes(readReceipts)
+    ) {
+      return res.status(400).json({ success: false, error: 'Invalid readReceipts privacy setting' });
+    }
+    if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
+      return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
+    }
+    if (onlineStatusVisibleTo !== undefined && !Array.isArray(onlineStatusVisibleTo)) {
+      return res.status(400).json({ success: false, error: 'onlineStatusVisibleTo must be an array of user IDs' });
+    }
+    if (whoCanMessage !== undefined && !['everyone', 'friends', 'friendsOfFriends'].includes(whoCanMessage)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanMessage privacy setting' });
+    }
+    if (discoverable !== undefined && !['everyone', 'nobody'].includes(discoverable)) {
+      return res.status(400).json({ success: false, error: 'Invalid discoverable privacy setting' });
+    }
+    if (story !== undefined && !['everyone', 'friends', 'nobody', 'selected'].includes(story)) {
+      return res.status(400).json({ success: false, error: 'Invalid story privacy setting' });
+    }
+    if (storyViewers !== undefined && !Array.isArray(storyViewers)) {
+      return res.status(400).json({ success: false, error: 'storyViewers must be an array of user IDs' });
+    }
+
+    const user = req.user;
+    applyPrivacyPatch(user, req.body || {});
+    user.markModified('privacy');
+    await user.save();
+    const self = user.toSelfJSON();
+    res.json({ success: true, data: self.privacy, user: self });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+}
+
 export async function updateProfile(req, res) {
   try {
     const { displayName, bio, phone, username, privacy } = req.body || {};
@@ -154,20 +209,6 @@ export async function updateProfile(req, res) {
     res.json({ success: true, data: user.toSelfJSON() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
-  }
-}
-
-/** Dedicated privacy settings endpoint used by Settings → Privacy. */
-export async function updatePrivacy(req, res) {
-  try {
-    const user = req.user;
-    applyPrivacyPatch(user, req.body || {});
-    await user.save();
-    const self = user.toSelfJSON();
-    res.json({ success: true, data: self.privacy, user: self });
-  } catch (err) {
-    const status = err.status || 500;
-    res.status(status).json({ success: false, error: err.message });
   }
 }
 
@@ -632,7 +673,7 @@ export async function discoverUsers(req, res) {
     const data = candidates.map((u) => {
       const info = statusByUserId.get(String(u._id));
       return {
-        ...u.toPublicJSON(),
+        ...u.toPublicJSON(req.user._id),
         requestStatus: info?.status || 'none',
         requestId: info?.requestId || null,
       };
@@ -754,7 +795,7 @@ export async function listFriends(req, res) {
       .map((id) => byId.get(String(id)))
       .filter(Boolean)
       .filter((u) => !blockedIds.has(String(u._id)))
-      .map((u) => u.toPublicJSON());
+      .map((u) => u.toPublicJSON(req.user._id));
 
     res.json({ success: true, data });
   } catch (err) {

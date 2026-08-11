@@ -63,7 +63,7 @@ async function assertCanDirectMessage(senderId, recipientId) {
   const senderIsFriend = recipientFriends.includes(String(senderOid));
   if (policy === 'friends') {
     if (!senderIsFriend) {
-      const err = new Error('This user only accepts messages from friends');
+      const err = new Error('This user is not accepting messages from friends');
       err.status = 403;
       throw err;
     }
@@ -75,7 +75,7 @@ async function assertCanDirectMessage(senderId, recipientId) {
     const senderFriends = new Set((sender?.friends || []).map(String));
     const mutual = recipientFriends.some((id) => senderFriends.has(id));
     if (!mutual) {
-      const err = new Error('This user only accepts messages from friends of friends');
+      const err = new Error('This user is not accepting messages from friends of friends');
       err.status = 403;
       throw err;
     }
