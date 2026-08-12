@@ -64,6 +64,7 @@ test('whoCanMessage gate blocks messaging from unauthorized senders', async () =
     }),
   });
   assert.equal(blocked.status, 403);
+  assert.equal(blocked.body?.code, 'NOT_FRIENDS');
   assert.match(String(blocked.body?.error || ''), /accepting messages/i);
 
   // Add friend relationship between userA and userB
