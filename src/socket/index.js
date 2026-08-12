@@ -29,12 +29,89 @@ export function getOnlineUserIds() {
   return [...onlineUsers.keys()];
 }
 
-async function canBroadcastOnline(userId) {
+export function canViewerSeeUserOnline(targetUser, viewerId) {
+  if (!targetUser || !viewerId) return false;
+  if (String(targetUser._id) === String(viewerId)) return true;
+
+  const privacy = targetUser.privacy || {};
+  let setting = privacy.onlineStatus;
+  if (!setting) {
+    setting = privacy.online === 'nobody' ? 'selected' : (privacy.online || 'everyone');
+  }
+
+  if (setting === 'everyone') return true;
+  if (setting === 'nobody') return false;
+
+  const friendIds = (targetUser.friends || []).map((f) => String(f._id || f));
+  const vId = String(viewerId);
+
+  if (setting === 'friends') {
+    return friendIds.includes(vId);
+  }
+
+  if (setting === 'selected') {
+    const visibleTo = (privacy.onlineStatusVisibleTo || []).map((u) => String(u._id || u));
+    return visibleTo.includes(vId);
+  }
+
+  return true;
+}
+
+async function broadcastPresence(io, userId, isOnline, lastLoginAtIso) {
   try {
-    const user = await User.findById(userId).select('privacy');
-    return user?.privacy?.online !== 'nobody';
+    const user = await User.findById(userId).select('privacy friends');
+    if (!user) return;
+
+    const privacy = user.privacy || {};
+    let setting = privacy.onlineStatus;
+    if (!setting) {
+      setting = privacy.online === 'nobody' ? 'selected' : (privacy.online || 'everyone');
+    }
+
+    if (setting === 'nobody') return;
+
+    const friendIds = (user.friends || []).map((f) => String(f._id || f));
+    const showLastSeenEveryone = (privacy.lastSeen || 'everyone') === 'everyone';
+
+    if (setting === 'everyone') {
+      const globalPayload = {
+        userId,
+        online: isOnline,
+        ...(showLastSeenEveryone && lastLoginAtIso ? { lastLoginAt: lastLoginAtIso } : {}),
+      };
+      io.emit('presence:update', globalPayload);
+
+      if (lastLoginAtIso && privacy.lastSeen === 'friends') {
+        for (const fId of friendIds) {
+          io.to(fId).emit('presence:update', { userId, online: isOnline, lastLoginAt: lastLoginAtIso });
+        }
+      }
+    } else if (setting === 'friends') {
+      const targetIds = new Set([userId, ...friendIds]);
+      for (const tId of targetIds) {
+        const isFriend = friendIds.includes(tId) || tId === userId;
+        const showLastSeen = privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
+        io.to(tId).emit('presence:update', {
+          userId,
+          online: isOnline,
+          ...(showLastSeen && lastLoginAtIso ? { lastLoginAt: lastLoginAtIso } : {}),
+        });
+      }
+    } else if (setting === 'selected') {
+      const visibleTo = (privacy.onlineStatusVisibleTo || []).map((u) => String(u._id || u));
+      const targetIds = new Set([userId, ...visibleTo]);
+      for (const tId of targetIds) {
+        const isFriend = friendIds.includes(tId) || tId === userId;
+        const showLastSeen = privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
+        io.to(tId).emit('presence:update', {
+          userId,
+          online: isOnline,
+          ...(showLastSeen && lastLoginAtIso ? { lastLoginAt: lastLoginAtIso } : {}),
+        });
+      }
+    }
   } catch {
-    return true;
+    // ignore
   }
 }
 
@@ -60,7 +137,6 @@ export function attachSocket(io) {
       }
 
       socket.userId = user._id.toString();
-      socket.privacyOnline = user.privacy?.online !== 'nobody';
       next();
     } catch (err) {
       next(new Error('Invalid or expired token'));
@@ -73,17 +149,18 @@ export function attachSocket(io) {
     setOnline(userId, socket.id);
 
     (async () => {
-      const visible = socket.privacyOnline ?? (await canBroadcastOnline(userId));
-      if (visible) {
-        io.emit('presence:update', { userId, online: true });
-      }
-      // Snapshot only includes users who allow online visibility
+      await broadcastPresence(io, userId, true);
+
       const ids = getOnlineUserIds();
-      const users = await User.find({ _id: { $in: ids } }).select('privacy');
-      const visibleIds = users
-        .filter((u) => u.privacy?.online !== 'nobody')
-        .map((u) => String(u._id));
-      socket.emit('presence:snapshot', { onlineUserIds: visibleIds });
+      if (ids.length) {
+        const users = await User.find({ _id: { $in: ids } }).select('privacy friends');
+        const visibleIds = users
+          .filter((u) => canViewerSeeUserOnline(u, userId))
+          .map((u) => String(u._id));
+        socket.emit('presence:snapshot', { onlineUserIds: visibleIds });
+      } else {
+        socket.emit('presence:snapshot', { onlineUserIds: [] });
+      }
     })();
 
     socket.on('typing:start', ({ to, groupId } = {}) => {
@@ -114,12 +191,6 @@ export function attachSocket(io) {
       socket.leave(`group:${String(groupId)}`);
     });
 
-    // WebRTC signaling — media is P2P; SDP/ICE must be X5 sealed envelopes only.
-    // Shared by 1:1 calls (call:*) and group meetings (meeting:*) — a meeting
-    // reuses the same `callId` wire field to carry its meetingId, so no
-    // separate identifier concept/schema is needed. The bot never holds
-    // roster/membership state, it just blindly relays sealed envelopes to a
-    // target user's room.
     function relaySealedEnvelope(eventName, payload = {}) {
       const { to, callId, envelope } = payload;
       if (!to || !callId) return;
@@ -174,15 +245,13 @@ export function attachSocket(io) {
       socket.leave(userId);
       const wentOffline = setOffline(userId, socket.id);
       if (wentOffline) {
+        const lastLoginAt = new Date();
         try {
-          await User.findByIdAndUpdate(userId, { lastLoginAt: new Date() });
+          await User.findByIdAndUpdate(userId, { lastLoginAt });
         } catch {
           // ignore
         }
-        const visible = await canBroadcastOnline(userId);
-        if (visible) {
-          io.emit('presence:update', { userId, online: false, lastLoginAt: new Date().toISOString() });
-        }
+        await broadcastPresence(io, userId, false, lastLoginAt.toISOString());
       }
     });
   });

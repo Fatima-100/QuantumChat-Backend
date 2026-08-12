@@ -51,6 +51,8 @@ export async function startTestServer(options = {}) {
       if (io) await new Promise((resolve) => io.close(resolve));
       await new Promise((resolve) => server.close(resolve));
       await mongoose.disconnect();
+      const { resetConnectionPromise } = await import('../../src/config/db.js');
+      resetConnectionPromise();
       await mongod.stop();
     },
   };

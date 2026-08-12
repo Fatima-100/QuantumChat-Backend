@@ -22,7 +22,7 @@ import {
   acceptFriendRequest,
   declineFriendRequest,
   removeFriend,
- getMe,
+  getMe,
   getMyPublicKeys,
   getNotificationSettings,
   updateNotificationSettings,
@@ -75,7 +75,6 @@ router.delete('/me/sessions/:sessionId', revokeSession);
 router.get('/me/vault', getVault);
 router.put('/me/vault', putVault);
 router.delete('/me/vault', deleteVault);
-router.get('/me', getMe);
 router.post('/me/ai-capsules', createAiCapsule);
 router.get('/me/ai-capsules', listAiCapsules);
 router.get('/me/push/vapid-public-key', getPushVapidPublicKey);

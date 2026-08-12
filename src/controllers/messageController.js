@@ -63,8 +63,10 @@ async function assertCanDirectMessage(senderId, recipientId) {
   const senderIsFriend = recipientFriends.includes(String(senderOid));
   if (policy === 'friends') {
     if (!senderIsFriend) {
-      const err = new Error('This user only accepts messages from friends');
+      const err = new Error('This user is not accepting messages from friends');
       err.status = 403;
+      err.code = 'NOT_FRIENDS';
+      err.recipientId = String(recipientOid);
       throw err;
     }
     return;
@@ -75,8 +77,10 @@ async function assertCanDirectMessage(senderId, recipientId) {
     const senderFriends = new Set((sender?.friends || []).map(String));
     const mutual = recipientFriends.some((id) => senderFriends.has(id));
     if (!mutual) {
-      const err = new Error('This user only accepts messages from friends of friends');
+      const err = new Error('This user is not accepting messages from friends of friends');
       err.status = 403;
+      err.code = 'NOT_FRIENDS';
+      err.recipientId = String(recipientOid);
       throw err;
     }
   }
@@ -369,7 +373,12 @@ export async function sendMessage(req, res) {
     incrementCiphertextsRelayed();
     res.status(201).json({ success: true, data: payload });
   } catch (err) {
-    res.status(err.status || 500).json({ success: false, error: err.message });
+    res.status(err.status || 500).json({
+      success: false,
+      error: err.message,
+      code: err.code || undefined,
+      recipientId: err.recipientId || undefined,
+    });
   }
 }
 

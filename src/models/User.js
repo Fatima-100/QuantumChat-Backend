@@ -257,14 +257,25 @@ userSchema.methods.createPasswordResetToken = function createPasswordResetToken(
   return token;
 };
 
-userSchema.methods.toPublicJSON = function toPublicJSON() {
+userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
   let publicKeys = Array.isArray(this.publicKeys) ? this.publicKeys.filter(Boolean) : [];
   if (publicKeys.length === 0 && this.publicKey) {
     publicKeys = [this.publicKey];
   }
 
   const privacy = this.privacy || {};
-  const showLastSeen = privacy.lastSeen !== 'nobody';
+  const lastSeenSetting = privacy.lastSeen || 'everyone';
+  let showLastSeen = false;
+  if (lastSeenSetting === 'everyone') {
+    showLastSeen = true;
+  } else if (lastSeenSetting === 'friends' && viewerId) {
+    if (String(viewerId) === String(this._id)) {
+      showLastSeen = true;
+    } else {
+      const friendIds = (this.friends || []).map((f) => String(f._id || f));
+      showLastSeen = friendIds.includes(String(viewerId));
+    }
+  }
 
   let readReceipts = privacy.readReceipts;
   if (typeof readReceipts === 'boolean') {
@@ -310,7 +321,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
 
 userSchema.methods.toSelfJSON = function toSelfJSON() {
   return {
-    ...this.toPublicJSON(),
+    ...this.toPublicJSON(this._id),
     email: this.email,
     phone: this.phone || '',
     emailVerified: Boolean(this.emailVerified),
