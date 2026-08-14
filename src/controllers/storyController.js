@@ -313,6 +313,84 @@ export async function getStoryMedia(req, res) {
   }
 }
 
+/** Records that the current user viewed a story. Called once per open. */
+export async function markStoryViewed(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid story id' });
+    }
+    const story = await Story.findById(id);
+    if (!story || story.expiresAt <= new Date()) {
+      return res.status(404).json({ success: false, error: 'Story not found or expired' });
+    }
+    const ownerId = String(story.user);
+    const viewerId = String(req.user._id);
+
+    // Don't record self-views, and respect the same blocked-user gate as reads.
+    if (viewerId === ownerId) {
+      return res.json({ success: true, data: { recorded: false } });
+    }
+    if (await areUsersBlocked(req.user._id, ownerId)) {
+      return res.status(403).json({ success: false, error: 'Not allowed' });
+    }
+
+    const result = await Story.updateOne(
+  { _id: id, 'views.user': { $ne: req.user._id } },
+  { $push: { views: { user: req.user._id, viewedAt: new Date() } } }
+  );
+  const wasNewView = result.modifiedCount === 1;
+
+  if (wasNewView) {
+    const io = req.app.get('io');
+    if (io) {
+      const updated = await Story.findById(id).select('views');
+      io.to(ownerId).emit('story:viewed', {
+        storyId: String(story._id),
+        viewer: { id: viewerId, username: req.user.username, hasAvatar: Boolean(req.user.avatarPath) },
+        viewedAt: new Date().toISOString(),
+        viewerCount: updated.views.length,
+      });
+    }
+  }
+
+    res.json({ success: true, data: { recorded: wasNewView } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** Returns the viewer list for a story. Owner-only. */
+export async function getStoryViewers(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid story id' });
+    }
+    const story = await Story.findById(id).populate('views.user', 'username avatarPath');
+    if (!story) {
+      return res.status(404).json({ success: false, error: 'Story not found' });
+    }
+    if (String(story.user) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+
+    const viewers = (story.views || [])
+      .slice()
+      .sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt))
+      .map((v) => ({
+        id: String(v.user?._id || v.user),
+        username: v.user?.username || 'User',
+        hasAvatar: Boolean(v.user?.avatarPath),
+        viewedAt: v.viewedAt,
+      }));
+
+    res.json({ success: true, data: { viewerCount: viewers.length, viewers } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 export async function deleteStory(req, res) {
   try {
     const { id } = req.params;
