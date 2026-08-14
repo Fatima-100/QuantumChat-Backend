@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
-
+import jwt from 'jsonwebtoken';
 const HEX_64 = /^[0-9a-f]{64}$/i;
 export const KEY_SET_SIZE = 5;
 
@@ -173,8 +173,16 @@ const userSchema = new mongoose.Schema(
     },
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
-    totpSecret: { type: String, select: false },
+   totpSecret: { type: String, select: false },
     totpEnabled: { type: Boolean, default: false },
+   vaultPasswordHash: { type: String, select: false, default: null },
+    vaultEnabled: { type: Boolean, default: false },
+    vaultedPeers: [
+      {
+        peer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        addedAt: { type: Date, default: Date.now },
+      },
+    ],
     publicKeys: {
       type: [String],
       required: true,
@@ -239,10 +247,17 @@ userSchema.pre('save', async function hashPassword(next) {
   next();
 });
 
-userSchema.methods.comparePassword = function comparePassword(candidate) {
-  return bcrypt.compare(candidate, this.password);
+userSchema.methods.compareVaultPassword = function compareVaultPassword(candidate) {
+  if (!this.vaultPasswordHash) return Promise.resolve(false);
+  return bcrypt.compare(candidate, this.vaultPasswordHash);
 };
-
+userSchema.methods.createVaultUnlockToken = function createVaultUnlockToken() {
+  return jwt.sign(
+    { sub: String(this._id), scope: 'vault' },
+    process.env.JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '15m' }
+  );
+};
 userSchema.methods.createEmailVerifyToken = function createEmailVerifyToken() {
   const token = crypto.randomBytes(32).toString('hex');
   this.emailVerifyToken = crypto.createHash('sha256').update(token).digest('hex');

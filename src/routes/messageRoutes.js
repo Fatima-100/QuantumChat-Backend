@@ -11,18 +11,19 @@ import {
   checkForwardAllowed,
 } from '../controllers/messageController.js';
 import { requireAuth } from '../middleware/auth.js';
+import { readVaultUnlock } from '../middleware/vaultAuth.js';
 import { apiLimiter, syncLimiter } from '../middleware/rateLimiter.js';
-
 const router = Router();
 
 // Declared before the router-level middleware and before '/:userId', for two
 // reasons: getConversation would otherwise match "sync" as a user id and 400,
 // and syncLimiter keys on req.user._id so requireAuth has to run first — the
 // opposite of the apiLimiter-then-requireAuth order used below.
-router.get('/sync', requireAuth, syncLimiter, syncMessages);
+router.get('/sync', requireAuth, readVaultUnlock, syncLimiter, syncMessages);
 
 router.use(apiLimiter);
 router.use(requireAuth);
+router.use(readVaultUnlock);
 router.post('/', sendMessage);
 router.post('/quantum-ai-response', publishQuantumAIDirectResponse);
 router.get('/:messageId/forward-check', checkForwardAllowed);
