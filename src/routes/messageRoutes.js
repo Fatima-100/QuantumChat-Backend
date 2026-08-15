@@ -15,12 +15,20 @@ import { readVaultUnlock } from '../middleware/vaultAuth.js';
 import { apiLimiter, syncLimiter } from '../middleware/rateLimiter.js';
 const router = Router();
 
+// Sub-router for /sync so syncLimiter is applied via a bare router-level
+// .use() (no path, before its one route) — the same shape apiLimiter uses
+// below, which CodeQL's rate-limiting check reliably recognizes. Applying
+// syncLimiter inline or on a path-scoped .use() on the main router wasn't
+// picked up by CodeQL even though it works correctly at runtime.
+const syncRouter = Router();
+syncRouter.use(requireAuth, readVaultUnlock, syncLimiter);
+syncRouter.get('/', syncMessages);
+
 // Declared before the router-level middleware and before '/:userId', for two
 // reasons: getConversation would otherwise match "sync" as a user id and 400,
 // and syncLimiter keys on req.user._id so requireAuth has to run first — the
 // opposite of the apiLimiter-then-requireAuth order used below.
-router.use('/sync', requireAuth, readVaultUnlock, syncLimiter);
-router.get('/sync', syncMessages);
+router.use('/sync', syncRouter);
 
 router.use(apiLimiter);
 router.use(requireAuth);
