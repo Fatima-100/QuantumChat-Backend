@@ -13,11 +13,14 @@ const friendRequestSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
 // Prevent duplicate pending requests in the same direction
 friendRequestSchema.index(
   { from: 1, to: 1 },
   { unique: true, partialFilterExpression: { status: 'pending' } }
 );
+
+// Speeds up listFriendRequests() which queries {to, status} and {from, status} together
+friendRequestSchema.index({ to: 1, status: 1 });
+friendRequestSchema.index({ from: 1, status: 1 });
 
 export default mongoose.model('FriendRequest', friendRequestSchema, 'friendrequests');

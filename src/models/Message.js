@@ -80,13 +80,18 @@ const messageSchema = new mongoose.Schema(
       allowForward: { type: Boolean, default: true },
       forwardUntil: { type: Date, default: null },
     },
-    expiresAt: { type: Date, default: null, index: true },
+   expiresAt: { type: Date, default: null, index: true },
+    // Vault decoy separation: when set, this message only belongs to the
+    // decoy thread for this user's locked vault view of the conversation.
+    // Never set for group messages. Plain metadata — does not touch the
+    // sealed envelopes/encryption at all.
+    decoyFor: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
   },
   { timestamps: true }
 );
-
 messageSchema.index({ from: 1, to: 1, createdAt: 1 });
 messageSchema.index({ group: 1, createdAt: 1 });
+messageSchema.index({ decoyFor: 1, from: 1, to: 1, createdAt: 1 });
 messageSchema.index({ 'aiMetadata.requestId': 1 }, { unique: true, sparse: true });
 messageSchema.index({ expiresAt: 1 }, { sparse: true });
 
