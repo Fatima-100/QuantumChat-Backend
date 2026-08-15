@@ -239,13 +239,16 @@ friends: [
   },
   { timestamps: true }
 );
-
 userSchema.pre('save', async function hashPassword(next) {
   if (!this.isModified('password')) return next();
   if (!this.password) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();
 });
+
+userSchema.methods.comparePassword = function comparePassword(candidate) {
+  return bcrypt.compare(candidate, this.password);
+};
 
 userSchema.methods.compareVaultPassword = function compareVaultPassword(candidate) {
   if (!this.vaultPasswordHash) return Promise.resolve(false);

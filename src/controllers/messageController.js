@@ -56,7 +56,7 @@ async function assertCanDirectMessageWithDoc(senderId, recipient) {
   const senderIsFriend = recipientFriends.includes(String(senderOid));
  if (policy === 'friends') {
     if (!senderIsFriend) {
-      const err = new Error('This user only accepts messages from friends');
+      const err = new Error('This user is not accepting messages from friends');
       err.status = 403;
       err.code = 'NOT_FRIENDS';
       err.recipientId = String(recipientOid);
@@ -70,8 +70,8 @@ async function assertCanDirectMessageWithDoc(senderId, recipient) {
     const sender = await User.findById(senderOid).select('friends');
     const senderFriends = new Set((sender?.friends || []).map(String));
     const mutual = recipientFriends.some((id) => senderFriends.has(id));
-    if (!mutual) {
-      const err = new Error('This user only accepts messages from friends of friends');
+  if (!mutual) {
+      const err = new Error('This user is not accepting messages from friends of friends');
       err.status = 403;
       err.code = 'NOT_FRIENDS';
       err.recipientId = String(recipientOid);
@@ -300,28 +300,29 @@ export async function sendMessage(req, res) {
       expiresInSeconds,
       forwardPolicy: forwardPolicyRaw,
     } = req.body;
-    if (!to || !validateEnvelope(forRecipient) || !validateEnvelope(forSender)) {
+   if (!to || !validateEnvelope(forRecipient) || !validateEnvelope(forSender)) {
       return res.status(400).json({
         success: false,
         error: 'to, forRecipient and forSender (each a sealed-box envelope) are all required',
       });
     }
-    if (!mongoose.isValidObjectId(to)) {
+    const toOid = toObjectId(to);
+    if (!toOid) {
       return res.status(400).json({ success: false, error: 'Invalid recipient id' });
     }
     if (attachmentId && !mongoose.isValidObjectId(attachmentId)) {
       return res.status(400).json({ success: false, error: 'Invalid attachment id' });
     }
-   const recipient = await User.findById(to).select('privacy friends blockedUsers username');
+    const recipient = await User.findById(toOid).select('privacy friends blockedUsers username');
     if (!recipient) {
       return res.status(404).json({ success: false, error: 'Recipient not found' });
     }
-    const senderBlockedRecipient = (req.user.blockedUsers || []).some((id) => String(id) === String(to));
+    const senderBlockedRecipient = (req.user.blockedUsers || []).some((id) => String(id) === String(toOid));
     const recipientBlockedSender = (recipient.blockedUsers || []).some((id) => String(id) === String(req.user._id));
     if (senderBlockedRecipient || recipientBlockedSender) {
       return res.status(403).json({ success: false, error: 'Cannot message a blocked user' });
     }
-   await assertCanDirectMessageWithDoc(req.user._id, recipient);
+    await assertCanDirectMessageWithDoc(req.user._id, recipient);
     const expiresAt = resolveExpiresAt(expiresInSeconds);
     if (expiresAt === null) {
       return res.status(400).json({
@@ -330,7 +331,7 @@ export async function sendMessage(req, res) {
       });
     }
 
-  const replyToId = await assertReplyAllowed(req, replyTo, { to });
+    const replyToId = await assertReplyAllowed(req, replyTo, { to: toOid });
     const forwardMeta = await assertForwardAllowed(req, forwardedFrom);
     const forwardPolicy = parseForwardPolicy(forwardPolicyRaw);
 
@@ -339,11 +340,11 @@ export async function sendMessage(req, res) {
     // thread only — it will never appear once I unlock the real vault view,
     // and the real (pre-vaulting) history stays completely untouched.
     const senderVaultedPeers = (req.user.vaultedPeers || []).map((v) => String(v.peer));
-    const isDecoySend = senderVaultedPeers.includes(String(to)) && !req.vaultUnlocked;
+    const isDecoySend = senderVaultedPeers.includes(String(toOid)) && !req.vaultUnlocked;
 
     const created = await Message.create({
       from: req.user._id,
-      to,
+      to: toOid,
       forRecipient: normalizeEnvelope(forRecipient),
       forSender: normalizeEnvelope(forSender),
       attachment: attachmentId || undefined,
@@ -363,19 +364,19 @@ export async function sendMessage(req, res) {
         .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
     }
     const payload = toClientMessage(message);
-    const isSelfChat = String(to) === String(req.user._id);
+    const isSelfChat = String(toOid) === String(req.user._id);
 
     const io = req.app.get('io');
     if (io) {
-      io.to(to.toString()).emit('message:new', payload);
+      io.to(toOid.toString()).emit('message:new', payload);
       // Self-notes: room is the same — don't emit twice.
       if (!isSelfChat) {
         io.to(req.user._id.toString()).emit('message:new', payload);
       }
     }
 
-    if (!isSelfChat && !isUserOnline(to)) {
-      notifyUser(to, { title: 'QuantumChat', body: 'New message' }).catch(() => {});
+    if (!isSelfChat && !isUserOnline(toOid)) {
+      notifyUser(toOid, { title: 'QuantumChat', body: 'New message' }).catch(() => { });
     }
 
     incrementCiphertextsRelayed();
@@ -460,7 +461,7 @@ export async function getConversation(req, res) {
     const before = req.query.before ? new Date(req.query.before) : null;
     const markRead = req.query.markRead !== '0';
 
- const myVaultedPeers = (req.user.vaultedPeers || []).map((v) => String(v.peer));
+    const myVaultedPeers = (req.user.vaultedPeers || []).map((v) => String(v.peer));
     const isVaultedConversation = myVaultedPeers.includes(String(peerOid));
 
     const filter = {
@@ -598,27 +599,27 @@ export async function syncMessages(req, res) {
     const vaultedPeerIds = req.vaultUnlocked
       ? []
       : (req.user.vaultedPeers || [])
-          .map((v) => toObjectId(v.peer))
-          .filter(Boolean);
+        .map((v) => toObjectId(v.peer))
+        .filter(Boolean);
 
     const involvesVaultedPeer = vaultedPeerIds.length
       ? [
-          { from: req.user._id, to: { $in: vaultedPeerIds } },
-          { from: { $in: vaultedPeerIds }, to: req.user._id },
-        ]
+        { from: req.user._id, to: { $in: vaultedPeerIds } },
+        { from: { $in: vaultedPeerIds }, to: req.user._id },
+      ]
       : null;
 
     const scopeFilter = involvesVaultedPeer
       ? {
-          $or: [
-            // Locked + vaulted peer: decoy thread only.
-            {
-              $and: [{ decoyFor: req.user._id }, { $or: involvesVaultedPeer }],
-            },
-            // Everything else: real messages only, decoys never leak.
-            { decoyFor: null, $nor: involvesVaultedPeer },
-          ],
-        }
+        $or: [
+          // Locked + vaulted peer: decoy thread only.
+          {
+            $and: [{ decoyFor: req.user._id }, { $or: involvesVaultedPeer }],
+          },
+          // Everything else: real messages only, decoys never leak.
+          { decoyFor: null, $nor: involvesVaultedPeer },
+        ],
+      }
       : { decoyFor: null };
 
     const filter = {
