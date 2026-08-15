@@ -21,7 +21,11 @@ const router = Router();
 // syncLimiter inline or on a path-scoped .use() on the main router wasn't
 // picked up by CodeQL even though it works correctly at runtime.
 const syncRouter = Router();
-syncRouter.use(requireAuth, readVaultUnlock, syncLimiter);
+// apiLimiter (IP-keyed) must run before requireAuth's DB lookup — this is
+// what CodeQL's "missing rate limiting" check requires: nothing gated the
+// requireAuth step itself. syncLimiter stays after requireAuth since it's
+// keyed on req.user._id.
+syncRouter.use(apiLimiter, requireAuth, readVaultUnlock, syncLimiter);
 syncRouter.get('/', syncMessages);
 
 // Declared before the router-level middleware and before '/:userId', for two
