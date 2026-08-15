@@ -19,7 +19,8 @@ const router = Router();
 // reasons: getConversation would otherwise match "sync" as a user id and 400,
 // and syncLimiter keys on req.user._id so requireAuth has to run first — the
 // opposite of the apiLimiter-then-requireAuth order used below.
-router.get('/sync', requireAuth, readVaultUnlock, syncLimiter, syncMessages);
+router.use('/sync', requireAuth, readVaultUnlock, syncLimiter);
+router.get('/sync', syncMessages);
 
 router.use(apiLimiter);
 router.use(requireAuth);
