@@ -81,6 +81,16 @@ const messageSchema = new mongoose.Schema(
       forwardUntil: { type: Date, default: null },
     },
    expiresAt: { type: Date, default: null, index: true },
+    // WhatsApp-style view-once media: photo / video / voice can be opened once,
+    // then the ciphertext is purged and a tombstone remains.
+    viewOnce: { type: Boolean, default: false },
+    viewOnceMediaKind: {
+      type: String,
+      enum: ['image', 'video', 'audio'],
+      default: undefined,
+    },
+    viewOnceOpenedAt: { type: Date, default: null },
+    viewOnceOpenedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     // Vault decoy separation: when set, this message only belongs to the
     // decoy thread for this user's locked vault view of the conversation.
     // Never set for group messages. Plain metadata — does not touch the

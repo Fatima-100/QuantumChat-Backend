@@ -82,6 +82,22 @@ async function assertCanDirectMessageWithDoc(senderId, recipient) {
   }
 }
 
+function mediaKindFromAttachment(attachment) {
+  if (!attachment) return null;
+  const mime = String(attachment.mimetype || '').toLowerCase();
+  const name = String(attachment.filename || '').toLowerCase();
+  if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
+    return 'audio';
+  }
+  if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) return 'image';
+  if (mime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) return 'video';
+  return null;
+}
+
+function viewOnceAllowedForAttachment(attachment) {
+  return Boolean(mediaKindFromAttachment(attachment));
+}
+
 function toClientMessage(doc) {
   const message = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
   message.id = message._id;
@@ -116,6 +132,13 @@ function toClientMessage(doc) {
   }
   if (typeof message.content === 'string') {
     message.content = message.content;
+  }
+  if (message.viewOnceOpenedBy) {
+    message.viewOnceOpenedBy = message.viewOnceOpenedBy?.toString?.() || String(message.viewOnceOpenedBy);
+  }
+  // Never leak ciphertext metadata after a view-once open.
+  if (message.viewOnce && message.viewOnceOpenedAt) {
+    message.attachment = null;
   }
   return message;
 }
@@ -251,6 +274,11 @@ async function assertForwardAllowed(req, forwardedFrom) {
     err.status = 403;
     throw err;
   }
+  if (original.viewOnce) {
+    const err = new Error('View once media cannot be forwarded');
+    err.status = 403;
+    throw err;
+  }
   const verdict = evaluateForwardPolicy(original);
   if (!verdict.allowed) {
     const err = new Error(verdict.reason || 'Forwarding not allowed');
@@ -281,6 +309,12 @@ export async function checkForwardAllowed(req, res) {
         data: { allowed: false, reason: 'Not allowed to forward this message' },
       });
     }
+    if (original.viewOnce) {
+      return res.json({
+        success: true,
+        data: { allowed: false, reason: 'View once media cannot be forwarded' },
+      });
+    }
     const verdict = evaluateForwardPolicy(original);
     return res.json({ success: true, data: verdict });
   } catch (err) {
@@ -300,6 +334,7 @@ export async function sendMessage(req, res) {
       kind,
       expiresInSeconds,
       forwardPolicy: forwardPolicyRaw,
+      viewOnce: viewOnceRaw,
     } = req.body;
    if (!to || !validateEnvelope(forRecipient) || !validateEnvelope(forSender)) {
       return res.status(400).json({
@@ -336,6 +371,29 @@ export async function sendMessage(req, res) {
     const forwardMeta = await assertForwardAllowed(req, forwardedFrom);
     const forwardPolicy = parseForwardPolicy(forwardPolicyRaw);
 
+    let viewOnce = viewOnceRaw === true;
+    let viewOnceMediaKind = null;
+    if (viewOnce) {
+      if (!attachmentId) {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      const attachment = await Attachment.findById(attachmentId);
+      if (!attachment || !viewOnceAllowedForAttachment(attachment)) {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      viewOnceMediaKind = mediaKindFromAttachment(attachment);
+      // View-once media must not be forwarded further.
+      if (!forwardPolicy) {
+        // force allowForward false via create fields below
+      }
+    }
+
     // Vault decoy: if I have this recipient vaulted and my vault is
     // currently locked on this request, this message belongs to the decoy
     // thread only — it will never appear once I unlock the real vault view,
@@ -355,6 +413,13 @@ export async function sendMessage(req, res) {
       forwardedFrom: forwardMeta,
       decoyFor: isDecoySend ? req.user._id : undefined,
       ...(forwardPolicy ? { forwardPolicy } : {}),
+      ...(viewOnce
+        ? {
+            viewOnce: true,
+            viewOnceMediaKind,
+            forwardPolicy: { allowForward: false, forwardUntil: null },
+          }
+        : {}),
     });
 
     // Skip a second round-trip when nothing needs populate — text sends are the hot path.
@@ -699,6 +764,89 @@ export async function markConversationRead(req, res) {
     res.json({ success: true, data: { updated: result.modifiedCount } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function openViewOnce(req, res) {
+  try {
+    const { messageId } = req.params;
+    if (!mongoose.isValidObjectId(messageId)) {
+      return res.status(400).json({ success: false, error: 'Invalid message id' });
+    }
+
+    const existing = await Message.findById(messageId).populate('attachment');
+    if (!existing) return res.status(404).json({ success: false, error: 'Message not found' });
+    if (!existing.viewOnce) {
+      return res.status(400).json({ success: false, error: 'Message is not view-once media' });
+    }
+    if (existing.viewOnceOpenedAt) {
+      const populated = await Message.findById(existing._id)
+        .populate('attachment', ATTACHMENT_POPULATE)
+        .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+      return res.json({ success: true, data: toClientMessage(populated) });
+    }
+
+    const uid = req.user._id.toString();
+    const senderId = existing.from.toString();
+    let isParty = false;
+    let groupMemberIds = null;
+
+    if (existing.group) {
+      const Group = (await import('../models/Group.js')).default;
+      const group = await Group.findById(existing.group);
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      groupMemberIds = group.members.map((m) => m.toString());
+      isParty = groupMemberIds.includes(uid);
+    } else if (existing.to) {
+      isParty = [senderId, existing.to.toString()].includes(uid);
+    }
+    if (!isParty) return res.status(403).json({ success: false, error: 'Not authorized' });
+
+    const attachmentId = existing.attachment?._id || existing.attachment;
+    const viewOnceMediaKind =
+      existing.viewOnceMediaKind ||
+      (existing.attachment ? mediaKindFromAttachment(existing.attachment) : undefined);
+
+    // Atomic claim so only one open wins across devices.
+    const claimed = await Message.findOneAndUpdate(
+      { _id: existing._id, viewOnce: true, viewOnceOpenedAt: null },
+      {
+        $set: {
+          viewOnceOpenedAt: new Date(),
+          viewOnceOpenedBy: req.user._id,
+          ...(viewOnceMediaKind ? { viewOnceMediaKind } : {}),
+        },
+        $unset: { attachment: 1 },
+      },
+      { new: true },
+    );
+
+    if (!claimed) {
+      const populated = await Message.findById(existing._id)
+        .populate('attachment', ATTACHMENT_POPULATE)
+        .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+      return res.json({ success: true, data: toClientMessage(populated) });
+    }
+
+    await removeAttachmentFiles(attachmentId);
+
+    const populated = await Message.findById(claimed._id)
+      .populate('attachment', ATTACHMENT_POPULATE)
+      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+    const payload = toClientMessage(populated);
+
+    const io = req.app.get('io');
+    if (existing.group && groupMemberIds) {
+      for (const memberId of groupMemberIds) {
+        io?.to(memberId).emit('message:view-once-opened', payload);
+      }
+    } else {
+      emitToParticipants(io, existing, 'message:view-once-opened', payload);
+    }
+
+    res.json({ success: true, data: payload });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 }
 
