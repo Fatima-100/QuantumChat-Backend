@@ -125,6 +125,7 @@ export function attachSocket(io) {
       if (!user) return next(new Error('User not found'));
 
       socket.userId = user._id.toString();
+      socket.typingIndicatorEnabled = user.privacy?.typingIndicator !== false;
       next();
     } catch (err) {
       next(new Error('Invalid or expired token'));
@@ -152,6 +153,7 @@ export function attachSocket(io) {
     })();
 
     socket.on('typing:start', ({ to, groupId } = {}) => {
+      if (socket.typingIndicatorEnabled === false) return;
       if (groupId) {
         io.to(`group:${String(groupId)}`).emit('typing:start', { from: userId, groupId: String(groupId) });
         return;
@@ -161,12 +163,19 @@ export function attachSocket(io) {
     });
 
     socket.on('typing:stop', ({ to, groupId } = {}) => {
+      if (socket.typingIndicatorEnabled === false) return;
       if (groupId) {
         io.to(`group:${String(groupId)}`).emit('typing:stop', { from: userId, groupId: String(groupId) });
         return;
       }
       if (!to) return;
       io.to(String(to)).emit('typing:stop', { from: userId });
+    });
+
+    socket.on('privacy:typing-indicator', ({ enabled } = {}) => {
+      if (typeof enabled === 'boolean') {
+        socket.typingIndicatorEnabled = enabled;
+      }
     });
 
     socket.on('group:join', ({ groupId } = {}) => {
