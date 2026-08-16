@@ -81,16 +81,16 @@ export const contactLookupLimiter = rateLimit({
     error: "Too many contact lookups, please try again shortly",
   },
 });
-
-/** Public device-link verify/claim endpoints — IP keyed to limit abuse. */
-export const deviceLinkPublicLimiter = rateLimit({
+/** Strict budget for vault password attempts — brute-force risk, same reasoning as authLimiter. */
+export const vaultAuthLimiter = rateLimit({
   windowMs: 60 * 1000,
-  limit: 30,
+  limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => String(req.user?._id || req.ip),
   message: {
     success: false,
-    error: "Too many pairing attempts, please try again shortly",
+    error: "Too many vault password attempts, please try again shortly",
   },
 });

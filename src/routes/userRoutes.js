@@ -45,7 +45,20 @@ import { getVault, putVault, deleteVault } from '../controllers/vaultController.
 import { createAiCapsule, listAiCapsules } from '../controllers/capsuleController.js';
 import { requireAuth } from '../middleware/auth.js';
 import { avatarUpload } from '../middleware/upload.js';
-import { apiLimiter, contactLookupLimiter } from '../middleware/rateLimiter.js';
+import { apiLimiter, contactLookupLimiter, vaultAuthLimiter } from '../middleware/rateLimiter.js';
+import {
+  getVaultStatus,
+  setVaultPassword,
+  unlockVault,
+  disableVault,
+} from '../controllers/vaultAuthController.js';
+import {
+  addToVault,
+  removeFromVault,
+  listVaultedPeerIds,
+  getPeerVaultDecoyStatus,
+} from '../controllers/vaultMembershipController.js';
+import { readVaultUnlock } from '../middleware/vaultAuth.js';
 
 const router = Router();
 
@@ -93,5 +106,13 @@ router.post('/friend-requests/:id/accept', acceptFriendRequest);
 router.post('/friend-requests/:id/decline', declineFriendRequest);
 router.delete('/friends/:id', removeFriend);
 router.get('/:id', getUser);
+router.get('/me/vault-lock/status', getVaultStatus);
+router.post('/me/vault-lock/set-password', vaultAuthLimiter, setVaultPassword);
+router.post('/me/vault-lock/unlock', vaultAuthLimiter, unlockVault);
+router.post('/me/vault-lock/disable', vaultAuthLimiter, disableVault);
 
+router.get('/me/vault-lock/members', listVaultedPeerIds);
+router.post('/me/vault-lock/members', addToVault);
+router.delete('/me/vault-lock/members/:peerId', removeFromVault);
+router.get('/me/vault-lock/members/:peerId/decoy-status', readVaultUnlock, getPeerVaultDecoyStatus);
 export default router;
