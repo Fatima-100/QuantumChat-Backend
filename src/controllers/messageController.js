@@ -374,13 +374,14 @@ export async function sendMessage(req, res) {
     let viewOnce = viewOnceRaw === true;
     let viewOnceMediaKind = null;
     if (viewOnce) {
-      if (!attachmentId) {
+      const viewOnceAttachmentOid = toObjectId(attachmentId);
+      if (!viewOnceAttachmentOid) {
         return res.status(400).json({
           success: false,
           error: 'View once is only available for photo, video, or voice attachments',
         });
       }
-      const attachment = await Attachment.findById(attachmentId);
+      const attachment = await Attachment.findById(viewOnceAttachmentOid);
       if (!attachment || !viewOnceAllowedForAttachment(attachment)) {
         return res.status(400).json({
           success: false,

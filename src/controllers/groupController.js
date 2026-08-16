@@ -1038,14 +1038,15 @@ export async function sendGroupMessage(req, res) {
     let viewOnce = viewOnceRaw === true;
     let viewOnceMediaKind;
     if (viewOnce) {
-      if (!attachmentId) {
+      const viewOnceAttachmentOid = toObjectId(attachmentId);
+      if (!viewOnceAttachmentOid) {
         return res.status(400).json({
           success: false,
           error: 'View once is only available for photo, video, or voice attachments',
         });
       }
       const Attachment = (await import('../models/Attachment.js')).default;
-      const attachment = await Attachment.findById(attachmentId);
+      const attachment = await Attachment.findById(viewOnceAttachmentOid);
       const mime = String(attachment?.mimetype || '').toLowerCase();
       const name = String(attachment?.filename || '').toLowerCase();
       if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
