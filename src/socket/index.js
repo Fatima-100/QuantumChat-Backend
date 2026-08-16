@@ -152,6 +152,27 @@ export function attachSocket(io) {
       }
     })();
 
+    async function sendPresenceSnapshot() {
+      const ids = getOnlineUserIds();
+      if (!ids.length) {
+        socket.emit('presence:snapshot', { onlineUserIds: [] });
+        return;
+      }
+      try {
+        const users = await User.find({ _id: { $in: ids } }).select('privacy friends');
+        const visibleIds = users
+          .filter((u) => canViewerSeeUserOnline(u, userId))
+          .map((u) => String(u._id));
+        socket.emit('presence:snapshot', { onlineUserIds: visibleIds });
+      } catch {
+        socket.emit('presence:snapshot', { onlineUserIds: [] });
+      }
+    }
+
+    socket.on('presence:request', () => {
+      sendPresenceSnapshot();
+    });
+
     socket.on('typing:start', ({ to, groupId } = {}) => {
       if (socket.typingIndicatorEnabled === false) return;
       if (groupId) {
