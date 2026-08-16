@@ -2,15 +2,18 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import webpush from 'web-push';
+import AppConfig from '../models/AppConfig.js';
 import PushSubscription from '../models/PushSubscription.js';
 import User from '../models/User.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const VAPID_FILE = path.resolve(__dirname, '../../data/vapid-keys.json');
+const VAPID_CONFIG_ID = 'vapid';
 
 let vapidPublicKey = null;
 let pushReady = false;
+let initPromise = null;
 
 function isWithinDoNotDisturb(dnd) {
   if (!dnd?.enabled) return false;
@@ -27,25 +30,82 @@ function isWithinDoNotDisturb(dnd) {
   return nowMinutes >= startMinutes || nowMinutes < endMinutes;
 }
 
-function loadOrCreateVapidKeys() {
-  let publicKey = process.env.VAPID_PUBLIC_KEY;
-  let privateKey = process.env.VAPID_PRIVATE_KEY;
-  const subject = process.env.VAPID_SUBJECT || 'mailto:admin@quantumchat.local';
+function applyVapidKeys({ publicKey, privateKey, subject }) {
+  webpush.setVapidDetails(subject, publicKey, privateKey);
+  vapidPublicKey = publicKey;
+  pushReady = true;
+}
 
-  if (publicKey && privateKey) {
-    return { publicKey, privateKey, subject, source: 'env' };
+async function persistVapidToMongo({ publicKey, privateKey, subject }) {
+  try {
+    await AppConfig.findByIdAndUpdate(
+      VAPID_CONFIG_ID,
+      { publicKey, privateKey, subject, updatedAt: new Date() },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+  } catch (err) {
+    console.warn('[push] Could not persist VAPID keys to MongoDB:', err.message);
+  }
+}
+
+function persistVapidToFile({ publicKey, privateKey, subject }) {
+  try {
+    fs.mkdirSync(path.dirname(VAPID_FILE), { recursive: true });
+    fs.writeFileSync(
+      VAPID_FILE,
+      JSON.stringify(
+        {
+          publicKey,
+          privateKey,
+          subject,
+          createdAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    console.warn('[push] Could not persist VAPID keys to file:', err.message);
+  }
+}
+
+async function loadOrCreateVapidKeys() {
+  const subject = process.env.VAPID_SUBJECT || 'mailto:admin@quantumchat.local';
+  const envPublic = process.env.VAPID_PUBLIC_KEY;
+  const envPrivate = process.env.VAPID_PRIVATE_KEY;
+
+  if (envPublic && envPrivate) {
+    return { publicKey: envPublic, privateKey: envPrivate, subject, source: 'env' };
+  }
+
+  try {
+    const saved = await AppConfig.findById(VAPID_CONFIG_ID).lean();
+    if (saved?.publicKey && saved?.privateKey) {
+      return {
+        publicKey: saved.publicKey,
+        privateKey: saved.privateKey,
+        subject: saved.subject || subject,
+        source: 'mongo',
+      };
+    }
+  } catch (err) {
+    console.warn('[push] Could not read VAPID keys from MongoDB:', err.message);
   }
 
   try {
     if (fs.existsSync(VAPID_FILE)) {
       const saved = JSON.parse(fs.readFileSync(VAPID_FILE, 'utf8'));
       if (saved?.publicKey && saved?.privateKey) {
-        return {
+        const keys = {
           publicKey: saved.publicKey,
           privateKey: saved.privateKey,
           subject: saved.subject || subject,
           source: 'file',
         };
+        // Mirror file keys into Mongo so Vercel serverless stays stable.
+        await persistVapidToMongo(keys);
+        return keys;
       }
     }
   } catch (err) {
@@ -53,58 +113,44 @@ function loadOrCreateVapidKeys() {
   }
 
   const generated = webpush.generateVAPIDKeys();
-  try {
-    fs.mkdirSync(path.dirname(VAPID_FILE), { recursive: true });
-    fs.writeFileSync(
-      VAPID_FILE,
-      JSON.stringify(
-        {
-          publicKey: generated.publicKey,
-          privateKey: generated.privateKey,
-          subject,
-          createdAt: new Date().toISOString(),
-        },
-        null,
-        2
-      ),
-      { mode: 0o600 }
-    );
-    console.warn(
-      '[push] Generated and saved VAPID keys to backend/data/vapid-keys.json. ' +
-        'For production, set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT in .env.'
-    );
-  } catch (err) {
-    console.warn('[push] Could not persist VAPID keys:', err.message);
-  }
-
-  return {
+  const keys = {
     publicKey: generated.publicKey,
     privateKey: generated.privateKey,
     subject,
     source: 'generated',
   };
+  await persistVapidToMongo(keys);
+  persistVapidToFile(keys);
+  console.warn(
+    '[push] Generated VAPID keys and saved to MongoDB (and file when possible). ' +
+      'For production, set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT in .env.',
+  );
+  return keys;
 }
 
-function initFromEnv() {
-  if (vapidPublicKey !== null) return;
+async function initFromEnvAsync() {
+  if (vapidPublicKey !== null && pushReady) return;
+  if (initPromise) return initPromise;
 
-  const { publicKey, privateKey, subject } = loadOrCreateVapidKeys();
+  initPromise = (async () => {
+    try {
+      const keys = await loadOrCreateVapidKeys();
+      applyVapidKeys(keys);
+    } catch (err) {
+      console.warn('[push] Failed to initialize web-push:', err.message);
+      vapidPublicKey = vapidPublicKey || '';
+      pushReady = false;
+    }
+  })();
 
-  try {
-    webpush.setVapidDetails(subject, publicKey, privateKey);
-    vapidPublicKey = publicKey;
-    pushReady = true;
-  } catch (err) {
-    console.warn('[push] Failed to initialize web-push:', err.message);
-    vapidPublicKey = publicKey || '';
-    pushReady = false;
-  }
+  return initPromise;
 }
 
-initFromEnv();
+// Best-effort sync init for local; serverless awaits in notify/getVapid.
+initFromEnvAsync().catch(() => {});
 
-export function getVapidPublicKey() {
-  initFromEnv();
+export async function getVapidPublicKey() {
+  await initFromEnvAsync();
   return vapidPublicKey || '';
 }
 
@@ -127,7 +173,7 @@ export async function saveSubscription(userId, sub) {
       userAgent: String(sub?.userAgent || '').slice(0, 512),
       createdAt: new Date(),
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    { upsert: true, new: true, setDefaultsOnInsert: true },
   );
 }
 
@@ -153,8 +199,8 @@ async function shouldSendPush(userId, payload) {
   if (isWithinDoNotDisturb(ns.doNotDisturb)) return false;
 
   const kind = payload?.kind || 'dm';
-  if (kind === 'dm' && ns.messageNotifications === 'direct_only') {
-    // allowed
+  if (kind === 'dm') {
+    if (ns.messageNotifications === 'off') return false;
   }
   if (kind === 'group') {
     const mode = ns.groupNotifications || 'all';
@@ -178,8 +224,13 @@ async function shouldSendPush(userId, payload) {
   return true;
 }
 
+/**
+ * Send an OS notification via Web Push.
+ * Always attempted (not gated on Socket.IO "online") so alerts still appear
+ * when the user is in another app (e.g. Cursor) with QuantumChat backgrounded.
+ */
 export async function notifyUser(userId, payload) {
-  initFromEnv();
+  await initFromEnvAsync();
   if (!pushReady) return;
 
   const uid = toObjectId(userId);
@@ -205,7 +256,7 @@ export async function notifyUser(userId, payload) {
     body: bodyText,
     icon: '/logo.png',
     badge: '/logo.png',
-    tag: payload?.tag || 'quantumchat',
+    tag: payload?.tag || payload?.conversationKey || 'quantumchat',
     silent,
     url: payload?.url || '/chat',
     data: { url: payload?.url || '/chat' },
@@ -222,7 +273,7 @@ export async function notifyUser(userId, payload) {
               auth: sub.keys.auth,
             },
           },
-          body
+          body,
         );
       } catch (err) {
         const status = err?.statusCode || err?.status;
@@ -230,6 +281,6 @@ export async function notifyUser(userId, payload) {
           await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
         }
       }
-    })
+    }),
   );
 }

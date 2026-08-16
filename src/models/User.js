@@ -201,6 +201,26 @@ const userSchema = new mongoose.Schema(
     lastLoginAt: {
       type: Date,
     },
+    /** Last REST/socket presence heartbeat — used when Socket.IO is unavailable (e.g. Vercel). */
+    presenceAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    typingTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    typingGroupId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Group',
+      default: null,
+    },
+    typingAt: {
+      type: Date,
+      default: null,
+    },
     privacy: {
       type: privacySchema,
       default: () => ({}),

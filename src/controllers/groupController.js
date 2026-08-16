@@ -6,7 +6,6 @@ import User from '../models/User.js';
 import Message from '../models/Message.js';
 import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
-import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
@@ -1099,16 +1098,14 @@ export async function sendGroupMessage(req, res) {
     const senderId = String(req.user._id);
     for (const mid of memberSet) {
       if (mid === senderId) continue;
-      if (!isUserOnline(mid)) {
-        notifyUser(mid, {
-          title: 'QuantumChat',
-          body: isPublic ? 'New public group message' : 'New group message',
-          kind: 'group',
-          isMention: mentions.map(String).includes(String(mid)),
-          conversationKey: `group:${groupId}`,
-          url: `/chat/g/${groupId}`,
-        }).catch(() => {});
-      }
+      notifyUser(mid, {
+        title: 'QuantumChat',
+        body: isPublic ? 'New public group message' : 'New group message',
+        kind: 'group',
+        isMention: mentions.map(String).includes(String(mid)),
+        conversationKey: `group:${groupId}`,
+        url: `/chat/g/${groupId}`,
+      }).catch(() => {});
     }
 
     if (!isPublic) incrementCiphertextsRelayed();

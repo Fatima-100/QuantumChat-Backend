@@ -9,6 +9,7 @@ import callSignalRoutes from './routes/callSignalRoutes.js';
 import chatThemeRoutes from './routes/chatThemeRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
 import messageRoutes from './routes/messageRoutes.js';
+import presenceRoutes from './routes/presenceRoutes.js';
 import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
@@ -76,6 +77,7 @@ export function createApp() {
   app.use('/api/stories', storyRoutes);
   app.use('/api/trust', trustRoutes);
   app.use('/api/call-signals', callSignalRoutes);
+  app.use('/api/presence', presenceRoutes);
   app.use('/api/chat-themes', chatThemeRoutes);
   // Server-to-server integration surface for other QuantumLogics sites,
   // authenticated with an X-API-Key header instead of a user JWT.
