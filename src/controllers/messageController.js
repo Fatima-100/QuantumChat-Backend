@@ -9,6 +9,7 @@ import Group from '../models/Group.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
 import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
+import { conversationKey } from '../utils/conversationKey.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
 import { toObjectId } from '../utils/toObjectId.js';
@@ -376,7 +377,13 @@ export async function sendMessage(req, res) {
     }
 
     if (!isSelfChat && !isUserOnline(toOid)) {
-      notifyUser(toOid, { title: 'QuantumChat', body: 'New message' }).catch(() => { });
+      notifyUser(toOid, {
+        title: 'QuantumChat',
+        body: 'New message',
+        kind: 'dm',
+        conversationKey: conversationKey({ from: req.user._id, to: toOid }),
+        url: `/chat/${req.user._id}`,
+      }).catch(() => { });
     }
 
     incrementCiphertextsRelayed();
