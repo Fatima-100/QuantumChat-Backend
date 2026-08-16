@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import Attachment from '../models/Attachment.js';
 import Group from '../models/Group.js';
+import Message from '../models/Message.js';
 import PendingAttachmentUpload from '../models/PendingAttachmentUpload.js';
 import { allowedOrigins } from '../config/corsOrigins.js';
 import { getStorage, getStorageProviderName, newObjectName, MAX_ATTACHMENT_SIZE } from '../middleware/upload.js';
@@ -317,6 +318,16 @@ export async function downloadAttachment(req, res) {
   try {
     const attachment = await Attachment.findById(req.params.id);
     if (!attachment) {
+      return res.status(404).json({ success: false, error: 'Attachment not found' });
+    }
+
+    // View-once media must not be re-fetched after it has been opened.
+    const linked = await Message.findOne({
+      attachment: attachment._id,
+      viewOnce: true,
+      viewOnceOpenedAt: { $ne: null },
+    }).select('_id');
+    if (linked) {
       return res.status(404).json({ success: false, error: 'Attachment not found' });
     }
 
