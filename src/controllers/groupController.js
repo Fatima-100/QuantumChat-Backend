@@ -1066,6 +1066,10 @@ export async function sendGroupMessage(req, res) {
         notifyUser(mid, {
           title: 'QuantumChat',
           body: isPublic ? 'New public group message' : 'New group message',
+          kind: 'group',
+          isMention: mentions.map(String).includes(String(mid)),
+          conversationKey: `group:${groupId}`,
+          url: `/chat/g/${groupId}`,
         }).catch(() => {});
       }
     }
