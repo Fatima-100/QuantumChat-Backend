@@ -7,7 +7,6 @@ import { getStorage } from '../middleware/upload.js';
 import User from '../models/User.js';
 import Group from '../models/Group.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
-import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
 import { conversationKey } from '../utils/conversationKey.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
@@ -442,7 +441,7 @@ export async function sendMessage(req, res) {
       }
     }
 
-    if (!isSelfChat && !isUserOnline(toOid)) {
+    if (!isSelfChat) {
       notifyUser(toOid, {
         title: 'QuantumChat',
         body: 'New message',

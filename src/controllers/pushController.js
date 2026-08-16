@@ -6,7 +6,7 @@ import {
 
 export async function getPushVapidPublicKey(req, res) {
   try {
-    const publicKey = getVapidPublicKey();
+    const publicKey = await getVapidPublicKey();
     if (!publicKey) {
       return res.status(503).json({ success: false, error: 'Push notifications are not configured' });
     }
