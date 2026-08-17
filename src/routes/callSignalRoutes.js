@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
-import { callSignalLimiter } from '../middleware/rateLimiter.js';
+import { apiLimiter, callSignalLimiter } from '../middleware/rateLimiter.js';
 import {
   createCallSignal,
   listCallSignals,
@@ -8,11 +8,15 @@ import {
 
 const router = Router();
 
-// callSignalLimiter keys on req.user._id, so requireAuth has to run first —
-// same ordering as the /messages/sync polling route. Keying by IP instead
-// would make two callers behind one NAT share a budget and 429 each other's
-// ICE candidates mid-handshake.
-router.get('/', requireAuth, callSignalLimiter, listCallSignals);
-router.post('/', requireAuth, callSignalLimiter, createCallSignal);
+// Apply limiters via router.use() (not inline on the route) so CodeQL's
+// js/missing-rate-limiting query recognizes them — same pattern as
+// messageRoutes /sync and presenceRoutes.
+// apiLimiter (IP) must run before requireAuth's DB lookup.
+// callSignalLimiter keys on req.user._id so it must run after requireAuth.
+router.use(apiLimiter);
+router.use(requireAuth);
+router.use(callSignalLimiter);
+router.get('/', listCallSignals);
+router.post('/', createCallSignal);
 
 export default router;
