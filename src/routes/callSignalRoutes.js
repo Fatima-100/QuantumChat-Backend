@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import {requireAuthLean} from '../middleware/auth.js';
 import {
   callSignalGatewayLimiter,
   callSignalLimiter,
@@ -15,7 +15,7 @@ const router = Router();
 // callSignalGatewayLimiter (IP, high ceiling) gates requireAuth's DB lookup.
 // callSignalLimiter (per-user) is the real budget — must run after requireAuth.
 router.use(callSignalGatewayLimiter);
-router.use(requireAuth);
+router.use(requireAuthLean);
 router.use(callSignalLimiter);
 router.get('/', listCallSignals);
 router.post('/', createCallSignal);
