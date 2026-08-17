@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
-import { apiLimiter, callSignalLimiter } from '../middleware/rateLimiter.js';
+import {
+  callSignalGatewayLimiter,
+  callSignalLimiter,
+} from '../middleware/rateLimiter.js';
 import {
   createCallSignal,
   listCallSignals,
@@ -8,12 +11,10 @@ import {
 
 const router = Router();
 
-// Apply limiters via router.use() (not inline on the route) so CodeQL's
-// js/missing-rate-limiting query recognizes them — same pattern as
-// messageRoutes /sync and presenceRoutes.
-// apiLimiter (IP) must run before requireAuth's DB lookup.
-// callSignalLimiter keys on req.user._id so it must run after requireAuth.
-router.use(apiLimiter);
+// Limiters via router.use() so CodeQL's js/missing-rate-limiting sees them.
+// callSignalGatewayLimiter (IP, high ceiling) gates requireAuth's DB lookup.
+// callSignalLimiter (per-user) is the real budget — must run after requireAuth.
+router.use(callSignalGatewayLimiter);
 router.use(requireAuth);
 router.use(callSignalLimiter);
 router.get('/', listCallSignals);
