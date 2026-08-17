@@ -8,14 +8,14 @@ import {
   getWallpaperImage,
   deleteWallpaperImage,
 } from '../controllers/chatThemeController.js';
-import { requireAuth } from '../middleware/auth.js';
+import {requireAuthLean } from '../middleware/auth.js';
 import { wallpaperUpload } from '../middleware/upload.js';
 import { apiLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
 
 router.use(apiLimiter);
-router.use(requireAuth);
+router.use(requireAuthLean);
 
 // Static catalog first, so it isn't shadowed by the ':peerId' param route.
 router.get('/presets', listPresets);

@@ -1,5 +1,7 @@
-// No top-level app/db imports — OPTIONS must work even if Express/Mongo boot fails.
 // vercel.json includeFiles ensures src/** is present for dynamic imports.
+import 'dotenv/config';
+import { connectDB } from '../src/config/db.js';
+import { createApp } from '../src/app.js';
 
 const STATIC_ALLOWED_ORIGINS = [
   'http://localhost:5173',
@@ -42,16 +44,8 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-let app;
-
-async function getApp() {
-  if (!app) {
-    await import('dotenv/config');
-    const { createApp } = await import('../src/app.js');
-    app = createApp();
-  }
-  return app;
-}
+// Built once per cold start (module-level), reused across warm invocations.
+const app = createApp();
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
@@ -62,8 +56,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    await import('dotenv/config');
-    const { connectDB } = await import('../src/config/db.js');
     await connectDB();
   } catch (err) {
     console.error('Database connection failed:', err);
@@ -73,8 +65,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const expressApp = await getApp();
-    return expressApp(req, res);
+    return app(req, res);
   } catch (err) {
     console.error('App handler failed:', err);
     applyCorsHeaders(req, res);
