@@ -94,3 +94,14 @@ export const vaultAuthLimiter = rateLimit({
     error: "Too many vault password attempts, please try again shortly",
   },
 });
+
+/** Public budget for device-link endpoints (verify/status/claim) keyed by IP. */
+export const deviceLinkPublicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => String(req.ip),
+  message: { success: false, error: "Too many device-link requests, please try again shortly" },
+});
