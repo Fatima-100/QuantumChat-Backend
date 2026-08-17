@@ -5,6 +5,7 @@ import Group from '../models/Group.js';
 import Message from '../models/Message.js';
 import User, { KEY_SET_SIZE } from '../models/User.js';
 import { conversationKey } from '../utils/conversationKey.js';
+import { normalizeNotificationSettings } from '../utils/notificationSettings.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
@@ -120,6 +121,7 @@ export async function updatePrivacy(req, res) {
       discoverable,
       story,
       storyViewers,
+      typingIndicator,
     } = req.body || {};
 
     if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
@@ -131,6 +133,9 @@ export async function updatePrivacy(req, res) {
       !['everyone', 'friends', 'nobody'].includes(readReceipts)
     ) {
       return res.status(400).json({ success: false, error: 'Invalid readReceipts privacy setting' });
+    }
+    if (typingIndicator !== undefined && typeof typingIndicator !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Invalid typingIndicator privacy setting' });
     }
     if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
       return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
@@ -233,6 +238,10 @@ function applyPrivacyPatch(user, privacy) {
     user.privacy.readReceipts = privacy.readReceipts;
   }
 
+  if (typeof privacy.typingIndicator === 'boolean') {
+    user.privacy.typingIndicator = privacy.typingIndicator;
+  }
+
   if (onlineStatusOk.includes(privacy.onlineStatus)) {
     user.privacy.onlineStatus = privacy.onlineStatus;
     // Presence still broadcasts; consumers should honor onlineStatus / visibleTo.
@@ -274,9 +283,10 @@ function applyPrivacyPatch(user, privacy) {
     user.privacy.storyViewers = next;
   }
 }
+
 export async function getNotificationSettings(req, res) {
   try {
-    res.json({ success: true, data: req.user.notificationSettings || {} });
+    res.json({ success: true, data: normalizeNotificationSettings(req.user.notificationSettings) });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -286,7 +296,10 @@ export async function updateNotificationSettings(req, res) {
   try {
     const settings = req.body || {};
     const user = req.user;
-    user.notificationSettings = user.notificationSettings || {};
+    // Ensure a real nested subdoc exists so Mongoose change tracking works.
+    if (!user.notificationSettings || typeof user.notificationSettings !== 'object') {
+      user.notificationSettings = {};
+    }
 
     const enums = {
       messageNotifications: ['all', 'direct_only', 'all_except_reactions'],
@@ -312,7 +325,11 @@ export async function updateNotificationSettings(req, res) {
     }
 
     if (settings.doNotDisturb && typeof settings.doNotDisturb === 'object') {
-      const dnd = user.notificationSettings.doNotDisturb || {};
+      const dnd = {
+        ...(user.notificationSettings.doNotDisturb?.toObject?.() ||
+          user.notificationSettings.doNotDisturb ||
+          {}),
+      };
       if (typeof settings.doNotDisturb.enabled === 'boolean') dnd.enabled = settings.doNotDisturb.enabled;
       if (typeof settings.doNotDisturb.startTime === 'string') dnd.startTime = settings.doNotDisturb.startTime;
       if (typeof settings.doNotDisturb.endTime === 'string') dnd.endTime = settings.doNotDisturb.endTime;
@@ -323,7 +340,11 @@ export async function updateNotificationSettings(req, res) {
     }
 
     if (settings.callNotifications && typeof settings.callNotifications === 'object') {
-      const call = user.notificationSettings.callNotifications || {};
+      const call = {
+        ...(user.notificationSettings.callNotifications?.toObject?.() ||
+          user.notificationSettings.callNotifications ||
+          {}),
+      };
       const c = settings.callNotifications;
       if (typeof c.voiceCallEnabled === 'boolean') call.voiceCallEnabled = c.voiceCallEnabled;
       if (typeof c.videoCallEnabled === 'boolean') call.videoCallEnabled = c.videoCallEnabled;
@@ -333,7 +354,11 @@ export async function updateNotificationSettings(req, res) {
     }
 
     if (settings.webNotifications && typeof settings.webNotifications === 'object') {
-      const web = user.notificationSettings.webNotifications || {};
+      const web = {
+        ...(user.notificationSettings.webNotifications?.toObject?.() ||
+          user.notificationSettings.webNotifications ||
+          {}),
+      };
       const w = settings.webNotifications;
       if (typeof w.enabled === 'boolean') web.enabled = w.enabled;
       if (typeof w.soundOnWeb === 'boolean') web.soundOnWeb = w.soundOnWeb;
@@ -341,8 +366,12 @@ export async function updateNotificationSettings(req, res) {
       user.notificationSettings.webNotifications = web;
     }
 
+    user.markModified('notificationSettings');
     await user.save();
-    res.json({ success: true, data: user.notificationSettings });
+    res.json({
+      success: true,
+      data: normalizeNotificationSettings(user.notificationSettings),
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

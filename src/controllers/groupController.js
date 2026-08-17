@@ -6,7 +6,6 @@ import User from '../models/User.js';
 import Message from '../models/Message.js';
 import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
-import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
@@ -70,6 +69,12 @@ function toClientMessage(doc) {
     optionIndex: v.optionIndex,
   }));
   message.kind = message.kind || 'text';
+  if (message.viewOnceOpenedBy) {
+    message.viewOnceOpenedBy = message.viewOnceOpenedBy?.toString?.() || String(message.viewOnceOpenedBy);
+  }
+  if (message.viewOnce && message.viewOnceOpenedAt) {
+    message.attachment = null;
+  }
   return message;
 }
 
@@ -913,6 +918,7 @@ export async function sendGroupMessage(req, res) {
       mentionedUserIds,
       expiresInSeconds,
       forwardPolicy: forwardPolicyRaw,
+      viewOnce: viewOnceRaw,
     } = req.body;
     if (!mongoose.isValidObjectId(groupId)) {
       return res.status(400).json({ success: false, error: 'Invalid group id' });
@@ -1025,6 +1031,35 @@ export async function sendGroupMessage(req, res) {
       forwardPolicy = { allowForward, ...(forwardUntil ? { forwardUntil } : {}) };
     }
 
+    let viewOnce = viewOnceRaw === true;
+    let viewOnceMediaKind;
+    if (viewOnce) {
+      const viewOnceAttachmentOid = toObjectId(attachmentId);
+      if (!viewOnceAttachmentOid) {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      const Attachment = (await import('../models/Attachment.js')).default;
+      const attachment = await Attachment.findById(viewOnceAttachmentOid);
+      const mime = String(attachment?.mimetype || '').toLowerCase();
+      const name = String(attachment?.filename || '').toLowerCase();
+      if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
+        viewOnceMediaKind = 'audio';
+      } else if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) {
+        viewOnceMediaKind = 'image';
+      } else if (mime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) {
+        viewOnceMediaKind = 'video';
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      forwardPolicy = { allowForward: false };
+    }
+
     const created = await Message.create({
       from: req.user._id,
       group: group._id,
@@ -1036,6 +1071,7 @@ export async function sendGroupMessage(req, res) {
       pollVotes: messageKind === 'poll' ? [] : undefined,
       expiresAt: expiresAt || undefined,
       ...(forwardPolicy ? { forwardPolicy } : {}),
+      ...(viewOnce ? { viewOnce: true, viewOnceMediaKind } : {}),
     });
 
     group.updatedAt = new Date();
@@ -1059,12 +1095,14 @@ export async function sendGroupMessage(req, res) {
     const senderId = String(req.user._id);
     for (const mid of memberSet) {
       if (mid === senderId) continue;
-      if (!isUserOnline(mid)) {
-        notifyUser(mid, {
-          title: 'QuantumChat',
-          body: isPublic ? 'New public group message' : 'New group message',
-        }).catch(() => {});
-      }
+      notifyUser(mid, {
+        title: 'QuantumChat',
+        body: isPublic ? 'New public group message' : 'New group message',
+        kind: 'group',
+        isMention: mentions.map(String).includes(String(mid)),
+        conversationKey: `group:${groupId}`,
+        url: `/chat/g/${groupId}`,
+      }).catch(() => {});
     }
 
     if (!isPublic) incrementCiphertextsRelayed();

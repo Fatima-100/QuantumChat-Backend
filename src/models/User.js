@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
+import { normalizeNotificationSettings } from '../utils/notificationSettings.js';
 const HEX_64 = /^[0-9a-f]{64}$/i;
 export const KEY_SET_SIZE = 5;
 
@@ -22,6 +23,8 @@ const privacySchema = new mongoose.Schema(
     onlineStatusVisibleTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     /** Boolean (legacy) or `everyone` | `friends` | `nobody`. */
     readReceipts: { type: mongoose.Schema.Types.Mixed, default: 'everyone' },
+    /** When false, this user does not broadcast typing indicators to peers. */
+    typingIndicator: { type: Boolean, default: true },
     whoCanMessage: {
       type: String,
       enum: ['everyone', 'friends', 'friendsOfFriends'],
@@ -198,6 +201,26 @@ const userSchema = new mongoose.Schema(
     lastLoginAt: {
       type: Date,
     },
+    /** Last REST/socket presence heartbeat — used when Socket.IO is unavailable (e.g. Vercel). */
+    presenceAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    typingTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    typingGroupId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Group',
+      default: null,
+    },
+    typingAt: {
+      type: Date,
+      default: null,
+    },
     privacy: {
       type: privacySchema,
       default: () => ({}),
@@ -324,6 +347,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
         ? privacy.onlineStatusVisibleTo.map((id) => String(id._id || id))
         : [],
       readReceipts,
+      typingIndicator: privacy.typingIndicator !== false,
       whoCanMessage: privacy.whoCanMessage || 'everyone',
       discoverable: privacy.discoverable || 'everyone',
       story: privacy.story || 'everyone',
@@ -346,7 +370,7 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     lastLoginAt: this.lastLoginAt,
     blockedUsers: Array.isArray(this.blockedUsers) ? this.blockedUsers.map((id) => String(id)) : [],
     friends: Array.isArray(this.friends) ? this.friends.map((id) => String(id)) : [],   // ← add this line
-    notificationSettings: this.notificationSettings || {},
+    notificationSettings: normalizeNotificationSettings(this.notificationSettings),
     mutedChats: Array.isArray(this.mutedChats) ? this.mutedChats.map((m) => ({
       conversationKey: m.conversationKey,
       expiresAt: m.expiresAt,
