@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthLean} from '../middleware/auth.js';
 import { groupPhotoUpload } from '../middleware/upload.js';
 import { apiLimiter } from '../middleware/rateLimiter.js';
 import {
@@ -37,7 +37,7 @@ const router = Router();
 // Rate-limit before auth so CodeQL js/missing-rate-limiting sees a limiter
 // on authorization/DB route handlers (requireAuth touches the user store).
 router.use(apiLimiter);
-router.use(requireAuth);
+router.use(requireAuthLean);
 
 router.get('/', listGroups);
 router.post('/', createGroup);

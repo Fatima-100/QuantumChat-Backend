@@ -45,6 +45,21 @@ export const syncLimiter = rateLimit({
 });
 
 /**
+ * IP-keyed gate in front of requireAuth so CodeQL sees rate limiting on the
+ * auth/DB lookup. The ceiling is high on purpose: two callers behind one NAT
+ * must not share a tight IP budget (that 429'd ICE and stuck calls). The
+ * real per-user cap is callSignalLimiter, applied after requireAuth.
+ */
+export const callSignalGatewayLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 2000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  message: { success: false, error: "Too many call signaling requests" },
+});
+
+/**
  * Separate budget for short-lived encrypted call signaling polling.
  *
  * Keyed by user, not IP — same reasoning as syncLimiter. Two people calling

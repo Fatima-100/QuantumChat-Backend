@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthLean} from '../middleware/auth.js';
 import { apiLimiter, syncLimiter } from '../middleware/rateLimiter.js';
 import { heartbeatPresence } from '../controllers/presenceController.js';
 
@@ -10,7 +10,7 @@ const router = Router();
 // messageRoutes /sync and storyRoutes. apiLimiter (IP) runs before auth;
 // syncLimiter keys on req.user._id so it must run after requireAuth.
 router.use(apiLimiter);
-router.use(requireAuth);
+router.use(requireAuthLean);
 router.use(syncLimiter);
 router.post('/heartbeat', heartbeatPresence);
 

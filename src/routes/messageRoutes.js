@@ -11,7 +11,7 @@ import {
   checkForwardAllowed,
   openViewOnce,
 } from '../controllers/messageController.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthLean } from '../middleware/auth.js';
 import { readVaultUnlock } from '../middleware/vaultAuth.js';
 import { apiLimiter, syncLimiter } from '../middleware/rateLimiter.js';
 const router = Router();
@@ -26,7 +26,7 @@ const syncRouter = Router();
 // what CodeQL's "missing rate limiting" check requires: nothing gated the
 // requireAuth step itself. syncLimiter stays after requireAuth since it's
 // keyed on req.user._id.
-syncRouter.use(apiLimiter, requireAuth, readVaultUnlock, syncLimiter);
+syncRouter.use(apiLimiter,requireAuthLean, readVaultUnlock, syncLimiter);
 syncRouter.get('/', syncMessages);
 
 // Declared before the router-level middleware and before '/:userId', for two
@@ -36,7 +36,7 @@ syncRouter.get('/', syncMessages);
 router.use('/sync', syncRouter);
 
 router.use(apiLimiter);
-router.use(requireAuth);
+router.use(requireAuthLean);
 router.use(readVaultUnlock);
 router.post('/', sendMessage);
 router.post('/quantum-ai-response', publishQuantumAIDirectResponse);

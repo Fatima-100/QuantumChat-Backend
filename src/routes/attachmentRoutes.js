@@ -5,14 +5,14 @@ import {
   finalizeAttachmentUpload,
   downloadAttachment,
 } from '../controllers/attachmentController.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthLean } from '../middleware/auth.js';
 import { apiLimiter } from '../middleware/rateLimiter.js';
 import { upload } from '../middleware/upload.js';
 
 const router = Router();
 
 router.use(apiLimiter);
-router.use(requireAuth);
+router.use(requireAuthLean);
 
 // Three-step upload: init (validate + get an upload target) -> put bytes
 // (direct to Google Drive from the browser, or proxied through us for
