@@ -223,13 +223,31 @@ export function attachSocket(io) {
     socket.on('meeting:offer', (payload = {}) => relaySealedEnvelope('meeting:offer', payload));
     socket.on('meeting:answer', (payload = {}) => relaySealedEnvelope('meeting:answer', payload));
     socket.on('meeting:ice', (payload = {}) => relaySealedEnvelope('meeting:ice', payload));
-
     socket.on('message:delivered', async ({ messageId } = {}) => {
       try {
         if (!messageId) return;
         const Message = (await import('../models/Message.js')).default;
         const msg = await Message.findById(messageId);
-        if (!msg || msg.group) return;
+        if (!msg) return;
+
+        if (msg.group) {
+          if (String(msg.from) === userId) return;
+          const already = (msg.deliveredTo || []).some((d) => String(d.user) === userId);
+          if (already) return;
+          const now = new Date();
+          await Message.updateOne(
+            { _id: msg._id, 'deliveredTo.user': { $ne: userId } },
+            { $push: { deliveredTo: { user: userId, at: now } } }
+          );
+          io.to(`group:${String(msg.group)}`).emit('message:status', {
+            groupId: String(msg.group),
+            userId,
+            messageIds: [String(msg._id)],
+            deliveredAt: now,
+          });
+          return;
+        }
+
         if (String(msg.to) !== userId) return;
         if (msg.deliveredAt) return;
         msg.deliveredAt = new Date();

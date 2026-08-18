@@ -63,7 +63,16 @@ function toClientMessage(doc) {
   if (typeof message.content === 'string') {
     message.content = message.content;
   }
+    message.deliveredTo = (message.deliveredTo || []).map((d) => ({
+    user: d.user?.toString?.() || String(d.user),
+    at: d.at,
+  }));
+  message.readBy = (message.readBy || []).map((r) => ({
+    user: r.user?.toString?.() || String(r.user),
+    at: r.at,
+  }));
   message.mentionedUserIds = (message.mentionedUserIds || []).map((id) => String(id));
+  
   message.pollVotes = (message.pollVotes || []).map((v) => ({
     user: String(v.user),
     optionIndex: v.optionIndex,
@@ -1252,6 +1261,34 @@ export async function getGroupMessages(req, res) {
     const page = hasMore ? rows.slice(0, limit) : rows;
     page.reverse();
 
+    const now = new Date();
+    const uid = req.user._id;
+    const undeliveredIds = page
+      .filter(
+        (msg) =>
+          String(msg.from) !== String(uid) &&
+          !(msg.deliveredTo || []).some((d) => String(d.user) === String(uid))
+      )
+      .map((msg) => msg._id);
+
+    if (undeliveredIds.length) {
+      await Message.updateMany(
+        { _id: { $in: undeliveredIds }, 'deliveredTo.user': { $ne: uid } },
+        { $push: { deliveredTo: { user: uid, at: now } } }
+      );
+      for (const msg of page) {
+        if (undeliveredIds.some((id) => String(id) === String(msg._id))) {
+          msg.deliveredTo = [...(msg.deliveredTo || []), { user: uid, at: now }];
+        }
+      }
+      req.app.get('io')?.to(`group:${groupOid}`).emit('message:status', {
+        groupId: String(groupOid),
+        userId: String(uid),
+        messageIds: undeliveredIds.map(String),
+        deliveredAt: now,
+      });
+    }
+
     res.json({
       success: true,
       data: page.map(toClientMessage),
@@ -1260,6 +1297,55 @@ export async function getGroupMessages(req, res) {
         nextBefore: page.length ? page[0].createdAt : null,
       },
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function markGroupMessagesRead(req, res) {
+  try {
+    const { groupId } = req.params;
+    const groupOid = toObjectId(groupId);
+    if (!groupOid) {
+      return res.status(400).json({ success: false, error: 'Invalid group id' });
+    }
+    const group = await Group.findById(groupOid).select('members');
+    if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+    if (!group.isMember(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not a group member' });
+    }
+
+    const uid = req.user._id;
+    const now = new Date();
+
+    const unread = await Message.find({
+      group: groupOid,
+      from: { $ne: uid },
+      'readBy.user': { $ne: uid },
+    }).select('_id');
+    const unreadIds = unread.map((m) => m._id);
+    if (!unreadIds.length) {
+      return res.json({ success: true, data: { updated: 0 } });
+    }
+
+    await Message.updateMany(
+      { _id: { $in: unreadIds }, 'deliveredTo.user': { $ne: uid } },
+      { $push: { deliveredTo: { user: uid, at: now } } }
+    );
+    await Message.updateMany(
+      { _id: { $in: unreadIds }, 'readBy.user': { $ne: uid } },
+      { $push: { readBy: { user: uid, at: now } } }
+    );
+
+    req.app.get('io')?.to(`group:${groupOid}`).emit('message:status', {
+      groupId: String(groupOid),
+      userId: String(uid),
+      messageIds: unreadIds.map(String),
+      deliveredAt: now,
+      readAt: now,
+    });
+
+    res.json({ success: true, data: { updated: unreadIds.length } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

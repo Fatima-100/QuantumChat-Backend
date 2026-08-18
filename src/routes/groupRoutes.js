@@ -22,7 +22,8 @@ import {
   removeAdmin,
   pinMessage,
   unpinMessage,
-  votePoll,
+    votePoll,
+  markGroupMessagesRead,
   publishQuantumAIGroupResponse,
   discoverGroups,
   joinPublicGroup,
@@ -75,6 +76,7 @@ router.delete('/:id/pins/:messageId', unpinMessage);
 
 router.get('/:groupId/messages', getGroupMessages);
 router.post('/:groupId/messages', sendGroupMessage);
+router.post('/:groupId/messages/read', markGroupMessagesRead);
 router.post('/:groupId/quantum-ai-response', publishQuantumAIGroupResponse);
 
 router.post('/messages/:messageId/poll-vote', votePoll);

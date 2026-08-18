@@ -10,6 +10,7 @@ import {
   publishQuantumAIDirectResponse,
   checkForwardAllowed,
   openViewOnce,
+  getMessageInfo,
 } from '../controllers/messageController.js';
 import { requireAuthLean } from '../middleware/auth.js';
 import { readVaultUnlock } from '../middleware/vaultAuth.js';
@@ -42,6 +43,7 @@ router.post('/', sendMessage);
 router.post('/quantum-ai-response', publishQuantumAIDirectResponse);
 router.get('/:messageId/forward-check', checkForwardAllowed);
 router.post('/:messageId/view-once', openViewOnce);
+router.get('/:messageId/info', getMessageInfo);
 router.get('/:userId', getConversation);
 router.post('/:userId/read', markConversationRead);
 router.patch('/:messageId', editMessage);

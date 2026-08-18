@@ -132,6 +132,17 @@ function toClientMessage(doc) {
   if (typeof message.content === 'string') {
     message.content = message.content;
   }
+  if (Array.isArray(message.editHistory)) {
+    message.editHistory = message.editHistory.map((h) => ({
+      forRecipient: h.forRecipient,
+      forSender: h.forSender,
+      content: h.content,
+      envelopes: Array.isArray(h.envelopes)
+        ? h.envelopes.map((e) => ({ ...e, user: e.user?.toString?.() || String(e.user) }))
+        : undefined,
+      editedAt: h.editedAt,
+    }));
+  }
   if (message.viewOnceOpenedBy) {
     message.viewOnceOpenedBy = message.viewOnceOpenedBy?.toString?.() || String(message.viewOnceOpenedBy);
   }
@@ -973,6 +984,15 @@ export async function editMessage(req, res) {
       return res.status(403).json({ success: false, error: 'Only the sender can edit this message' });
     }
 
+    const previousVersion = {
+      editedAt: message.editedAt || message.createdAt,
+      ...(message.group
+        ? typeof message.content === 'string'
+          ? { content: message.content }
+          : { envelopes: message.envelopes }
+        : { forRecipient: message.forRecipient, forSender: message.forSender }),
+    };
+
     if (message.group) {
       const Group = (await import('../models/Group.js')).default;
       const group = await Group.findById(message.group);
@@ -1010,9 +1030,10 @@ export async function editMessage(req, res) {
       message.forSender = normalizeEnvelope(forSender);
     }
 
-    message.editedAt = new Date();
+      message.editedAt = new Date();
+    message.editHistory = [...(message.editHistory || []), previousVersion];
+    message.markModified('editHistory');
     await message.save();
-
     const populated = await Message.findById(message._id)
       .populate('attachment', ATTACHMENT_POPULATE)
       .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
@@ -1034,5 +1055,63 @@ export async function editMessage(req, res) {
     res.json({ success: true, data: payload });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+}
+export async function getMessageInfo(req, res) {
+  try {
+    const { messageId } = req.params;
+    const messageOid = toObjectId(messageId);
+    if (!messageOid) {
+      return res.status(400).json({ success: false, error: 'Invalid message id' });
+    }
+    const message = await Message.findById(messageOid);
+    if (!message) return res.status(404).json({ success: false, error: 'Message not found' });
+
+    const uid = req.user._id.toString();
+    if (String(message.from) !== uid) {
+      return res.status(403).json({ success: false, error: 'Only the sender can view message info' });
+    }
+
+    if (message.group) {
+      const group = await Group.findById(message.group).populate('members', 'username avatarPath');
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+
+      const deliveredMap = new Map((message.deliveredTo || []).map((d) => [String(d.user), d.at]));
+      const readMap = new Map((message.readBy || []).map((r) => [String(r.user), r.at]));
+
+      const members = group.members
+        .filter((m) => String(m._id) !== uid)
+        .map((m) => ({
+          userId: String(m._id),
+          username: m.username,
+          hasAvatar: Boolean(m.avatarPath),
+          deliveredAt: deliveredMap.get(String(m._id)) || null,
+          readAt: readMap.get(String(m._id)) || null,
+        }));
+
+      return res.json({
+        success: true,
+        data: {
+          id: message._id.toString(),
+          isGroup: true,
+          totalRecipients: members.length,
+          deliveredCount: members.filter((m) => m.deliveredAt).length,
+          readCount: members.filter((m) => m.readAt).length,
+          members,
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: message._id.toString(),
+        isGroup: false,
+        deliveredAt: message.deliveredAt || null,
+        readAt: message.readAt || null,
+      },
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 }
