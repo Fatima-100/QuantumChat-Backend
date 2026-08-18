@@ -12,6 +12,7 @@ const envelopeSchema = new mongoose.Schema(
   { _id: false }
 );
 
+
 const reactionSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -21,7 +22,13 @@ const reactionSchema = new mongoose.Schema(
   },
   { _id: false, timestamps: { createdAt: true, updatedAt: false } }
 );
-
+const deliveryReceiptSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    at: { type: Date, required: true },
+  },
+  { _id: false }
+);
 const memberEnvelopeSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -41,6 +48,16 @@ const pollVoteSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const editHistoryEntrySchema = new mongoose.Schema(
+  {
+    forRecipient: { type: envelopeSchema },
+    forSender: { type: envelopeSchema },
+    content: { type: String, maxlength: 8000 },
+    envelopes: { type: [memberEnvelopeSchema], default: undefined },
+    editedAt: { type: Date, required: true },
+  },
+  { _id: false }
+);
 const messageSchema = new mongoose.Schema(
   {
     from: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -55,8 +72,13 @@ const messageSchema = new mongoose.Schema(
     reactions: { type: [reactionSchema], default: [] },
     replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
     editedAt: { type: Date },
+    editHistory: { type: [editHistoryEntrySchema], default: undefined },
     deliveredAt: { type: Date },
     readAt: { type: Date },
+        // Group-only per-member delivery/read receipts. DMs keep using the
+    // single deliveredAt/readAt fields above — untouched.
+    deliveredTo: { type: [deliveryReceiptSchema], default: undefined },
+    readBy: { type: [deliveryReceiptSchema], default: undefined },
     kind: {
       type: String,
       enum: ['text', 'announcement', 'poll', 'event', 'file', 'ai', 'ai_note', 'system'],
