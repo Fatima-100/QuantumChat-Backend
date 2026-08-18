@@ -35,6 +35,12 @@ import {
   unsubscribePush,
 } from '../controllers/pushController.js';
 import { listSessions, revokeSession } from '../controllers/sessionController.js';
+import {
+  createLinkRequest,
+  approveLinkRequest,
+  rejectLinkRequest,
+  sendLinkEmail,
+} from '../controllers/deviceLinkController.js';
 import { getVault, putVault, deleteVault } from '../controllers/vaultController.js';
 import { createAiCapsule, listAiCapsules } from '../controllers/capsuleController.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -74,6 +80,10 @@ router.delete('/me', deleteAccount);
 router.post('/me/avatar', avatarUpload.single('avatar'), uploadAvatar);
 router.delete('/me/avatar', deleteAvatar);
 router.get('/me/sessions', listSessions);
+router.post('/me/sessions/link', createLinkRequest);
+router.post('/me/sessions/link/approve', approveLinkRequest);
+router.post('/me/sessions/link/reject', rejectLinkRequest);
+router.post('/me/sessions/link/email', sendLinkEmail);
 router.delete('/me/sessions/:sessionId', revokeSession);
 router.get('/me/vault', getVault);
 router.put('/me/vault', putVault);

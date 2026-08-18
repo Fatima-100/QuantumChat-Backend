@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import DeviceSession from '../models/DeviceSession.js';
 
 export async function requireAuth(req, res, next) {
   try {
@@ -16,6 +17,21 @@ export async function requireAuth(req, res, next) {
     const user = await User.findById(payload.id);
     if (!user) {
       return res.status(401).json({ success: false, error: 'User not found' });
+    }
+
+    if (payload.sessionId) {
+      const session = await DeviceSession.findOne({
+        user: user._id,
+        sessionId: String(payload.sessionId),
+        revokedAt: null,
+      });
+      if (!session) {
+        return res.status(401).json({ success: false, error: 'Session revoked or invalid' });
+      }
+      session.lastSeenAt = new Date();
+      await session.save();
+      req.sessionId = session.sessionId;
+      req.deviceSession = session;
     }
 
     req.user = user;

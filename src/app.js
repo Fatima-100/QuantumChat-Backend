@@ -14,6 +14,7 @@ import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
+import deviceLinkRoutes from './routes/deviceLinkRoutes.js';
 import { allowedOrigins } from './config/corsOrigins.js';
 
 export function createApp() {
@@ -70,6 +71,7 @@ export function createApp() {
     if (req.method === 'OPTIONS') return next();
     return authLimiter(req, res, next);
   }, authRoutes);
+  app.use('/api/users/sessions/link', deviceLinkRoutes);
   app.use('/api/users', userRoutes);
   app.use('/api/messages', messageRoutes);
   app.use('/api/attachments', attachmentRoutes);

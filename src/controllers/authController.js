@@ -25,7 +25,7 @@ async function issueSession(user, req, { deviceLabel, rememberMe = true } = {}) 
   await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: user.lastLoginAt } });
   const deviceSession = await registerSession(user._id, req, { deviceLabel });
   const expiresIn = rememberMe ? rememberMeExpiresIn() : process.env.JWT_EXPIRES_IN || '30d';
-  const token = generateToken(user._id, { expiresIn });
+  const token = generateToken(user._id, { expiresIn, sessionId: deviceSession.sessionId });
   return {
     token,
     user: user.toSelfJSON(),
@@ -239,12 +239,17 @@ export async function verify2fa(req, res) {
 
 export async function me(req, res) {
   // Sliding session: issue a fresh token so active users stay signed in.
-  const token = generateToken(req.user._id, { expiresIn: rememberMeExpiresIn() });
+  const tokenOptions = { expiresIn: rememberMeExpiresIn() };
+  if (req.sessionId) {
+    tokenOptions.sessionId = req.sessionId;
+  }
+  const token = generateToken(req.user._id, tokenOptions);
   res.json({
     success: true,
     data: {
       user: req.user.toSelfJSON(),
       token,
+      ...(req.sessionId ? { sessionId: req.sessionId } : {}),
     },
   });
 }

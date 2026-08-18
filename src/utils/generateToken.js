@@ -5,7 +5,11 @@ function resolveExpiresIn(expiresIn) {
 }
 
 export function generateToken(userId, options = {}) {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
+  const payload = { id: userId };
+  if (options.sessionId) {
+    payload.sessionId = String(options.sessionId);
+  }
+  return jwt.sign(payload, process.env.JWT_SECRET, {
     algorithm: 'HS256',
     expiresIn: resolveExpiresIn(options.expiresIn),
   });
