@@ -3,6 +3,7 @@ import User from '../models/User.js';
 import DeviceSession from '../models/DeviceSession.js';
 import { isSealedEnvelope, canUserInviteToCall } from '../utils/callEnvelope.js';
 import { canViewerSeeUserOnline } from '../utils/presencePrivacy.js';
+import { notifyUser } from '../services/pushService.js';
 
 const onlineUsers = new Map(); // userId -> Set(socketId)
 
@@ -212,6 +213,17 @@ export function attachSocket(io) {
         callId: String(callId),
         envelope,
       });
+      if (eventName === 'call:invite' || eventName === 'meeting:invite') {
+        const isMeeting = eventName === 'meeting:invite';
+        notifyUser(to, {
+          title: 'QuantumChat',
+          body: isMeeting ? 'Incoming meeting' : 'Incoming call',
+          kind: 'call',
+          tag: `${isMeeting ? 'meeting' : 'call'}:${callId}`,
+          url: '/chat',
+          requireInteraction: true,
+        }).catch(() => {});
+      }
     }
 
     socket.on('call:invite', (payload = {}) => relaySealedEnvelope('call:invite', payload));

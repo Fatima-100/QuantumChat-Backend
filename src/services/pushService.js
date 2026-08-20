@@ -209,6 +209,10 @@ async function shouldSendPush(userId, payload) {
       return false;
     }
   }
+  if (kind === 'call') {
+    const cn = ns.callNotifications || {};
+    if (cn.voiceCallEnabled === false && cn.videoCallEnabled === false) return false;
+  }
 
   const convKey = payload?.conversationKey;
   if (convKey && Array.isArray(user.mutedChats)) {
@@ -258,8 +262,9 @@ export async function notifyUser(userId, payload) {
     badge: '/logo.png',
     tag: payload?.tag || payload?.conversationKey || 'quantumchat',
     silent,
+    requireInteraction: payload?.requireInteraction === true,
     url: payload?.url || '/chat',
-    data: { url: payload?.url || '/chat' },
+    data: { url: payload?.url || '/chat', kind: payload?.kind || 'dm' },
   });
 
   await Promise.all(
