@@ -2,6 +2,7 @@ import CallSignal from '../models/CallSignal.js';
 import User from '../models/User.js';
 import { isSealedEnvelope } from '../utils/callEnvelope.js';
 import { toObjectId } from '../utils/toObjectId.js';
+import { notifyUser } from '../services/pushService.js';
 
 const ALLOWED_EVENTS = new Set([
   'call:invite',
@@ -29,6 +30,19 @@ function toClientSignal(signal) {
     envelope: signal.envelope,
     createdAt: signal.createdAt,
   };
+}
+
+function pushIncomingCall(toUserId, event, callId) {
+  if (event !== 'call:invite' && event !== 'meeting:invite') return;
+  const isMeeting = event === 'meeting:invite';
+  notifyUser(toUserId, {
+    title: 'QuantumChat',
+    body: isMeeting ? 'Incoming meeting' : 'Incoming call',
+    kind: 'call',
+    tag: `${isMeeting ? 'meeting' : 'call'}:${callId}`,
+    url: '/chat',
+    requireInteraction: true,
+  }).catch(() => {});
 }
 
 /**
@@ -69,6 +83,8 @@ export async function createCallSignal(req, res) {
         targetPublicKey: String(envelope.targetPublicKey).toLowerCase(),
       },
     });
+
+    pushIncomingCall(recipientId, event, callId.trim());
 
     return res.status(201).json({
       success: true,
