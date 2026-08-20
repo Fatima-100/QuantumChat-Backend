@@ -119,3 +119,39 @@ test('lastSeen is withheld from unauthorized viewers', async () => {
   assert.equal(asB.status, 200);
   assert.ok('lastLoginAt' in asB.body.data);
 });
+
+test('call signal invitations enforce privacy settings', async () => {
+  const dummyEnvelope = {
+    ciphertext: 'dGVzdA==',
+    nonce: 'dGVzdG5vbmNl',
+    ephemeralPublicKey: 'a'.repeat(64),
+    targetPublicKey: 'b'.repeat(64),
+  };
+
+  // userC is not a friend of userA (userA has whoCanMessage: 'friends').
+  const callRes = await fetchJson(`${ctx.base}/call-signals`, {
+    method: 'POST',
+    headers: authHeaders(userC.token),
+    body: JSON.stringify({
+      to: userA.user.id,
+      callId: 'call-priv-test-1',
+      event: 'call:invite',
+      envelope: dummyEnvelope,
+    }),
+  });
+  assert.equal(callRes.status, 403);
+
+  // userB is a friend of userA, so call invitation is permitted.
+  const callResB = await fetchJson(`${ctx.base}/call-signals`, {
+    method: 'POST',
+    headers: authHeaders(userB.token),
+    body: JSON.stringify({
+      to: userA.user.id,
+      callId: 'call-priv-test-2',
+      event: 'call:invite',
+      envelope: dummyEnvelope,
+    }),
+  });
+  assert.equal(callResB.status, 201);
+});
+

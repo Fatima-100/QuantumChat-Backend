@@ -1,6 +1,6 @@
 import CallSignal from '../models/CallSignal.js';
 import User from '../models/User.js';
-import { isSealedEnvelope } from '../utils/callEnvelope.js';
+import { isSealedEnvelope, canUserInviteToCall } from '../utils/callEnvelope.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
 const ALLOWED_EVENTS = new Set([
@@ -56,6 +56,14 @@ export async function createCallSignal(req, res) {
     if (!recipientExists) {
       return res.status(404).json({ success: false, error: 'Call recipient not found' });
     }
+
+    if (event === 'call:invite' || event === 'meeting:invite') {
+      const allowed = await canUserInviteToCall(req.user._id, recipientId);
+      if (!allowed) {
+        return res.status(403).json({ success: false, error: 'Call invitation blocked by user privacy settings' });
+      }
+    }
+
 
     const signal = await CallSignal.create({
       from: req.user._id,

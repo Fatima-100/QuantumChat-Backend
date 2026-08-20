@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import DeviceSession from '../models/DeviceSession.js';
-import { isSealedEnvelope } from '../utils/callEnvelope.js';
+import { isSealedEnvelope, canUserInviteToCall } from '../utils/callEnvelope.js';
 import { canViewerSeeUserOnline } from '../utils/presencePrivacy.js';
 
 const onlineUsers = new Map(); // userId -> Set(socketId)
@@ -196,11 +196,17 @@ export function attachSocket(io) {
       socket.leave(`group:${String(groupId)}`);
     });
 
-    function relaySealedEnvelope(eventName, payload = {}) {
+    async function relaySealedEnvelope(eventName, payload = {}) {
       const { to, callId, envelope } = payload;
       if (!to || !callId) return;
       if (payload.sdp != null || payload.candidate != null) return;
       if (!isSealedEnvelope(envelope)) return;
+
+      if (eventName === 'call:invite' || eventName === 'meeting:invite') {
+        const allowed = await canUserInviteToCall(userId, to);
+        if (!allowed) return;
+      }
+
       io.to(String(to)).emit(eventName, {
         from: userId,
         callId: String(callId),
