@@ -1,0 +1,22 @@
+export declare const SOCKET_EVENTS: {
+    readonly CONVERSATION_JOIN: "conversation:join";
+    readonly CONVERSATION_LEAVE: "conversation:leave";
+    readonly MESSAGE_SEND: "message:send";
+    readonly MESSAGE_EDIT: "message:edit";
+    readonly MESSAGE_DELETE: "message:delete";
+    readonly MESSAGE_REACT: "message:react";
+    readonly MESSAGE_NEW: "message:new";
+    readonly MESSAGE_EDITED: "message:edited";
+    readonly MESSAGE_DELETED: "message:deleted";
+    readonly MESSAGE_REACTED: "message:reacted";
+    readonly MESSAGE_READ: "message:read";
+    readonly MESSAGE_STATUS: "message:status";
+    readonly TYPING_START: "typing:start";
+    readonly TYPING_STOP: "typing:stop";
+    readonly TYPING_UPDATE: "typing:update";
+    readonly PRESENCE_UPDATE: "presence:update";
+    readonly PRESENCE_BULK: "presence:bulk";
+    readonly UNREAD_COUNT: "unread:count";
+    readonly CONVERSATION_UPDATED: "conversation:updated";
+};
+export type SocketEvent = (typeof SOCKET_EVENTS)[keyof typeof SOCKET_EVENTS];
