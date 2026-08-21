@@ -68,6 +68,8 @@ const notificationSettingsSchema = new mongoose.Schema(
       enum: ['on', 'off', 'custom'],
       default: 'on',
     },
+     /** Whether this user wants a reminder 5 minutes before a friend's birthday begins. */
+    birthdayReminders: { type: Boolean, default: true },
     doNotDisturb: {
       enabled: { type: Boolean, default: false },
       startTime: { type: String, default: '22:00' },
@@ -137,6 +139,23 @@ const userSchema = new mongoose.Schema(
       trim: true,
       maxlength: 32,
       default: '',
+    },
+     dateOfBirth: {
+      type: Date,
+      default: null,
+    },
+    /** IANA timezone name, auto-captured client-side (e.g. 'Asia/Karachi'). Used to schedule birthday notifications in the user's local time. */
+    timezone: {
+      type: String,
+      trim: true,
+      maxlength: 64,
+      default: 'UTC',
+    },
+    /** Internal — prevents the birthday job from notifying friends twice in the same year. Never exposed via JSON. */
+    lastBirthdayNotifiedYear: {
+      type: Number,
+      default: null,
+      select: false,
     },
     email: {
       type: String,
@@ -366,6 +385,8 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     ...this.toPublicJSON(this._id),
     email: this.email,
     phone: this.phone || '',
+    dateOfBirth: this.dateOfBirth,
+    timezone: this.timezone || 'UTC',
     emailVerified: Boolean(this.emailVerified),
     lastLoginAt: this.lastLoginAt,
     blockedUsers: Array.isArray(this.blockedUsers) ? this.blockedUsers.map((id) => String(id)) : [],

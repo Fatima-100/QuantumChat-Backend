@@ -170,7 +170,7 @@ export async function updatePrivacy(req, res) {
 
 export async function updateProfile(req, res) {
   try {
-    const { displayName, bio, phone, username, privacy } = req.body || {};
+    const { displayName, bio, phone, username, privacy, dateOfBirth, timezone } = req.body || {};
     const user = req.user;
 
     if (username != null) {
@@ -205,6 +205,40 @@ export async function updateProfile(req, res) {
         return res.status(400).json({ success: false, error: 'Enter a valid phone number' });
       }
       user.phone = normalized;
+    }
+    if (dateOfBirth != null) {
+      if (dateOfBirth === '') {
+        user.dateOfBirth = null; // explicit clear
+      } else {
+        const parsed = new Date(dateOfBirth);
+        if (Number.isNaN(parsed.getTime())) {
+          return res.status(400).json({ success: false, error: 'Enter a valid date of birth' });
+        }
+        if (parsed > new Date()) {
+          return res.status(400).json({ success: false, error: 'Date of birth cannot be in the future' });
+        }
+        // Reset the "already notified this year" guard whenever the date changes,
+        // so a corrected birthday isn't silently skipped for the rest of the year.
+        user.lastBirthdayNotifiedYear = null;
+        user.dateOfBirth = parsed;
+      }
+    }
+     if (timezone != null) {
+      const tz = String(timezone).trim().slice(0, 64);
+      if (tz) {
+        try {
+          Intl.DateTimeFormat(undefined, { timeZone: tz }); // throws on invalid IANA name
+          if (tz !== user.timezone) {
+            // Same reasoning as the dateOfBirth reset above — a timezone
+            // change shifts when "local midnight" actually falls, so don't
+            // let a stale guard from the old zone skip this year's notice.
+            user.lastBirthdayNotifiedYear = null;
+          }
+          user.timezone = tz;
+        } catch {
+          return res.status(400).json({ success: false, error: 'Invalid timezone' });
+        }
+      }
     }
     if (privacy && typeof privacy === 'object') {
       applyPrivacyPatch(user, privacy);
@@ -319,6 +353,9 @@ export async function updateNotificationSettings(req, res) {
 
     if (typeof settings.soundEnabled === 'boolean') {
       user.notificationSettings.soundEnabled = settings.soundEnabled;
+    }
+    if (typeof settings.birthdayReminders === 'boolean') {
+      user.notificationSettings.birthdayReminders = settings.birthdayReminders;
     }
     if (typeof settings.soundVolume === 'number' && settings.soundVolume >= 0 && settings.soundVolume <= 100) {
       user.notificationSettings.soundVolume = settings.soundVolume;

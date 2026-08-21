@@ -1,14 +1,14 @@
 import crypto from 'crypto';
 import User, { KEY_SET_SIZE } from '../models/User.js';
 import {
-  generateToken,
   generate2faTempToken,
-  verifyToken,
+  generateToken,
   rememberMeExpiresIn,
+  verifyToken,
 } from '../utils/generateToken.js';
 import { appBaseUrl, sendAppMail, shouldExposeEmailLinks } from '../utils/mail.js';
+import { buildOtpauthUrl, generateTotpSecret, verifyTotp } from '../utils/totp.js';
 import { registerSession } from './sessionController.js';
-import { generateTotpSecret, buildOtpauthUrl, verifyTotp } from '../utils/totp.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
@@ -36,7 +36,7 @@ async function issueSession(user, req, { deviceLabel, rememberMe = true } = {}) 
 
 export async function register(req, res) {
   try {
-    const { username, email, password, publicKeys, displayName } = req.body;
+    const { username, email, password, publicKeys, displayName, dateOfBirth, timezone } = req.body;
     const normalizedUsername = String(username || '').trim();
     const normalizedEmail = String(email || '').trim().toLowerCase();
 
@@ -59,6 +59,23 @@ export async function register(req, res) {
       });
     }
 
+    let parsedDob = null;
+    if (dateOfBirth) {
+      parsedDob = new Date(dateOfBirth);
+      if (Number.isNaN(parsedDob.getTime()) || parsedDob > new Date()) {
+        return res.status(400).json({ success: false, error: 'Enter a valid date of birth, or leave it blank' });
+      }
+    }
+    let resolvedTimezone = 'UTC';
+    if (timezone) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: timezone });
+        resolvedTimezone = String(timezone).slice(0, 64);
+      } catch {
+        // Fall back to UTC rather than blocking registration over a bad timezone guess.
+      }
+    }
+
     const existing = await User.findOne({
       $or: [{ email: normalizedEmail }, { username: { $regex: new RegExp(`^${normalizedUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }],
     });
@@ -71,6 +88,8 @@ export async function register(req, res) {
       email: normalizedEmail,
       password,
       displayName: typeof displayName === 'string' ? displayName.trim().slice(0, 60) : '',
+      dateOfBirth: parsedDob,
+      timezone: resolvedTimezone,
       publicKeys: publicKeys.map((k) => k.toLowerCase()),
       lastLoginAt: new Date(),
       emailVerified: false,

@@ -3,9 +3,10 @@ import http from "http";
 import { Server } from "socket.io";
 import { createApp } from "./src/app.js";
 import { connectDB } from "./src/config/db.js";
-import { attachSocket } from "./src/socket/index.js";
+import { runBirthdayNotifications } from "./src/jobs/birthdayNotifications.js";
 import { runExpiryJobs } from "./src/jobs/expireMessages.js";
 import FriendRequest from "./src/models/FriendRequest.js";
+import { attachSocket } from "./src/socket/index.js";
 
 async function main() {
   await connectDB();
@@ -31,6 +32,11 @@ async function main() {
   setTimeout(() => {
     runExpiryJobs(io).catch((err) => console.error("Expiry job failed:", err.message));
   }, 5_000);
+
+  const BIRTHDAY_CHECK_INTERVAL_MS = 60_000; // must stay <= the job's 1-minute window
+  setInterval(() => {
+    runBirthdayNotifications().catch((err) => console.error("Birthday notification job failed:", err.message));
+  }, BIRTHDAY_CHECK_INTERVAL_MS);
 
   const port = process.env.PORT || 5000;
   server.listen(port, () =>
