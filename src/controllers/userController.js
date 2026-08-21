@@ -130,6 +130,7 @@ export async function updatePrivacy(req, res) {
       whoCanInviteViaGroupLink,
       whoCanCreateGroupsWithMe,
       groupMentions,
+      screenshotProtection,
     } = req.body || {};
 
     if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
@@ -144,6 +145,9 @@ export async function updatePrivacy(req, res) {
     }
     if (typingIndicator !== undefined && typeof typingIndicator !== 'boolean') {
       return res.status(400).json({ success: false, error: 'Invalid typingIndicator privacy setting' });
+    }
+    if (screenshotProtection !== undefined && typeof screenshotProtection !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Invalid screenshotProtection privacy setting' });
     }
     if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
       return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
@@ -276,6 +280,10 @@ function applyPrivacyPatch(user, privacy) {
 
   if (typeof privacy.typingIndicator === 'boolean') {
     user.privacy.typingIndicator = privacy.typingIndicator;
+  }
+
+  if (typeof privacy.screenshotProtection === 'boolean') {
+    user.privacy.screenshotProtection = privacy.screenshotProtection;
   }
 
   if (onlineStatusOk.includes(privacy.onlineStatus)) {

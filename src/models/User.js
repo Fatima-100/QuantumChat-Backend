@@ -76,6 +76,11 @@ const privacySchema = new mongoose.Schema(
       enum: ['everyone', 'adminsOnly', 'nobody'],
       default: 'everyone',
     },
+    /**
+     * When true, this device blocks screenshots / screen recording on chats
+     * and profiles where the platform supports it (strongest on mobile).
+     */
+    screenshotProtection: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -432,6 +437,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
       whoCanInviteViaGroupLink: privacy.whoCanInviteViaGroupLink || 'everyone',
       whoCanCreateGroupsWithMe: privacy.whoCanCreateGroupsWithMe || 'everyone',
       groupMentions: privacy.groupMentions || 'everyone',
+      screenshotProtection: privacy.screenshotProtection === true,
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
