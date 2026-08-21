@@ -12,7 +12,8 @@ import { toObjectId } from '../utils/toObjectId.js';
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
 const PUBLIC_FIELDS =
-  'username displayName bio phone email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+  'username displayName bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+
 
 export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
   const aId = toObjectId(userAId);
@@ -122,6 +123,13 @@ export async function updatePrivacy(req, res) {
       story,
       storyViewers,
       typingIndicator,
+      profileVisibility,
+      birthdayVisibility,
+      whoCanMention,
+      whoCanAddToGroups,
+      whoCanInviteViaGroupLink,
+      whoCanCreateGroupsWithMe,
+      groupMentions,
     } = req.body || {};
 
     if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
@@ -154,6 +162,27 @@ export async function updatePrivacy(req, res) {
     }
     if (storyViewers !== undefined && !Array.isArray(storyViewers)) {
       return res.status(400).json({ success: false, error: 'storyViewers must be an array of user IDs' });
+    }
+    if (profileVisibility !== undefined && !['everyone', 'friends', 'onlyMe'].includes(profileVisibility)) {
+      return res.status(400).json({ success: false, error: 'Invalid profileVisibility privacy setting' });
+    }
+    if (birthdayVisibility !== undefined && !['everyone', 'friends', 'onlyMe'].includes(birthdayVisibility)) {
+      return res.status(400).json({ success: false, error: 'Invalid birthdayVisibility privacy setting' });
+    }
+    if (whoCanMention !== undefined && !['everyone', 'friends', 'nobody'].includes(whoCanMention)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanMention privacy setting' });
+    }
+    if (whoCanAddToGroups !== undefined && !['everyone', 'friends', 'nobody'].includes(whoCanAddToGroups)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanAddToGroups privacy setting' });
+    }
+    if (whoCanInviteViaGroupLink !== undefined && !['everyone', 'friends', 'nobody'].includes(whoCanInviteViaGroupLink)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanInviteViaGroupLink privacy setting' });
+    }
+    if (whoCanCreateGroupsWithMe !== undefined && !['everyone', 'friends'].includes(whoCanCreateGroupsWithMe)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanCreateGroupsWithMe privacy setting' });
+    }
+    if (groupMentions !== undefined && !['everyone', 'adminsOnly', 'nobody'].includes(groupMentions)) {
+      return res.status(400).json({ success: false, error: 'Invalid groupMentions privacy setting' });
     }
 
     const user = req.user;
@@ -227,6 +256,13 @@ function applyPrivacyPatch(user, privacy) {
   const whoOk = ['everyone', 'friends', 'friendsOfFriends'];
   const storyOk = ['everyone', 'friends', 'nobody', 'selected']; 
   const discoverOk = ['everyone', 'nobody'];
+  const profileVisibilityOk = ['everyone', 'friends', 'onlyMe'];
+  const birthdayVisibilityOk = ['everyone', 'friends', 'onlyMe'];
+  const whoCanMentionOk = ['everyone', 'friends', 'nobody'];
+  const whoCanAddToGroupsOk = ['everyone', 'friends', 'nobody'];
+  const whoCanInviteViaGroupLinkOk = ['everyone', 'friends', 'nobody'];
+  const whoCanCreateGroupsWithMeOk = ['everyone', 'friends'];
+  const groupMentionsOk = ['everyone', 'adminsOnly', 'nobody'];
 
   if (lastSeenOk.includes(privacy.lastSeen)) {
     user.privacy.lastSeen = privacy.lastSeen;
@@ -269,7 +305,7 @@ function applyPrivacyPatch(user, privacy) {
   if (discoverOk.includes(privacy.discoverable)) {
     user.privacy.discoverable = privacy.discoverable;
   }
-  // --- Story privacy (new) ---
+  // --- Story privacy ---
   if (storyOk.includes(privacy.story)) {
     user.privacy.story = privacy.story;
   }
@@ -281,6 +317,27 @@ function applyPrivacyPatch(user, privacy) {
       if (id && friendSet.has(String(id))) next.push(id);
     }
     user.privacy.storyViewers = next;
+  }
+  if (profileVisibilityOk.includes(privacy.profileVisibility)) {
+    user.privacy.profileVisibility = privacy.profileVisibility;
+  }
+  if (birthdayVisibilityOk.includes(privacy.birthdayVisibility)) {
+    user.privacy.birthdayVisibility = privacy.birthdayVisibility;
+  }
+  if (whoCanMentionOk.includes(privacy.whoCanMention)) {
+    user.privacy.whoCanMention = privacy.whoCanMention;
+  }
+  if (whoCanAddToGroupsOk.includes(privacy.whoCanAddToGroups)) {
+    user.privacy.whoCanAddToGroups = privacy.whoCanAddToGroups;
+  }
+  if (whoCanInviteViaGroupLinkOk.includes(privacy.whoCanInviteViaGroupLink)) {
+    user.privacy.whoCanInviteViaGroupLink = privacy.whoCanInviteViaGroupLink;
+  }
+  if (whoCanCreateGroupsWithMeOk.includes(privacy.whoCanCreateGroupsWithMe)) {
+    user.privacy.whoCanCreateGroupsWithMe = privacy.whoCanCreateGroupsWithMe;
+  }
+  if (groupMentionsOk.includes(privacy.groupMentions)) {
+    user.privacy.groupMentions = privacy.groupMentions;
   }
 }
 

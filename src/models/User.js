@@ -41,6 +41,41 @@ const privacySchema = new mongoose.Schema(
       default: 'everyone',
     },
     storyViewers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    profileVisibility: {
+      type: String,
+      enum: ['everyone', 'friends', 'onlyMe'],
+      default: 'everyone',
+    },
+    birthdayVisibility: {
+      type: String,
+      enum: ['everyone', 'friends', 'onlyMe'],
+      default: 'everyone',
+    },
+    whoCanMention: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    whoCanAddToGroups: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    whoCanInviteViaGroupLink: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    whoCanCreateGroupsWithMe: {
+      type: String,
+      enum: ['everyone', 'friends'],
+      default: 'everyone',
+    },
+    groupMentions: {
+      type: String,
+      enum: ['everyone', 'adminsOnly', 'nobody'],
+      default: 'everyone',
+    },
   },
   { _id: false }
 );
@@ -138,6 +173,10 @@ const userSchema = new mongoose.Schema(
       maxlength: 32,
       default: '',
     },
+    birthday: {
+      type: Date,
+      default: null,
+    },
     email: {
       type: String,
       required: true,
@@ -176,9 +215,9 @@ const userSchema = new mongoose.Schema(
     },
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
-   totpSecret: { type: String, select: false },
+    totpSecret: { type: String, select: false },
     totpEnabled: { type: Boolean, default: false },
-   vaultPasswordHash: { type: String, select: false, default: null },
+    vaultPasswordHash: { type: String, select: false, default: null },
     vaultEnabled: { type: Boolean, default: false },
     vaultedPeers: [
       {
@@ -318,6 +357,36 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     }
   }
 
+  const profileVisibilitySetting = privacy.profileVisibility || 'everyone';
+  let showProfileDetails = false;
+  if (profileVisibilitySetting === 'everyone') {
+    showProfileDetails = true;
+  } else if (profileVisibilitySetting === 'friends' && viewerId) {
+    if (String(viewerId) === String(this._id)) {
+      showProfileDetails = true;
+    } else {
+      const friendIds = (this.friends || []).map((f) => String(f._id || f));
+      showProfileDetails = friendIds.includes(String(viewerId));
+    }
+  } else if (profileVisibilitySetting === 'onlyMe' && viewerId) {
+    showProfileDetails = String(viewerId) === String(this._id);
+  }
+
+  const birthdayVisibilitySetting = privacy.birthdayVisibility || 'everyone';
+  let showBirthday = false;
+  if (birthdayVisibilitySetting === 'everyone') {
+    showBirthday = true;
+  } else if (birthdayVisibilitySetting === 'friends' && viewerId) {
+    if (String(viewerId) === String(this._id)) {
+      showBirthday = true;
+    } else {
+      const friendIds = (this.friends || []).map((f) => String(f._id || f));
+      showBirthday = friendIds.includes(String(viewerId));
+    }
+  } else if (birthdayVisibilitySetting === 'onlyMe' && viewerId) {
+    showBirthday = String(viewerId) === String(this._id);
+  }
+
   let readReceipts = privacy.readReceipts;
   if (typeof readReceipts === 'boolean') {
     readReceipts = readReceipts ? 'everyone' : 'nobody';
@@ -334,7 +403,9 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     id: this._id,
     username: this.username,
     displayName: this.displayName || '',
-    bio: this.bio || '',
+    bio: showProfileDetails ? (this.bio || '') : '',
+    phone: showProfileDetails ? (this.phone || '') : '',
+    birthday: (showBirthday && this.birthday) ? this.birthday : null,
     publicKeys: publicKeys.map((k) => String(k).toLowerCase()),
     keyRotatedAt: this.keyRotatedAt,
     lastLoginAt: showLastSeen ? this.lastLoginAt : null,
@@ -354,6 +425,13 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
       storyViewers: Array.isArray(privacy.storyViewers)
         ? privacy.storyViewers.map((id) => String(id._id || id))
         : [],
+      profileVisibility: privacy.profileVisibility || 'everyone',
+      birthdayVisibility: privacy.birthdayVisibility || 'everyone',
+      whoCanMention: privacy.whoCanMention || 'everyone',
+      whoCanAddToGroups: privacy.whoCanAddToGroups || 'everyone',
+      whoCanInviteViaGroupLink: privacy.whoCanInviteViaGroupLink || 'everyone',
+      whoCanCreateGroupsWithMe: privacy.whoCanCreateGroupsWithMe || 'everyone',
+      groupMentions: privacy.groupMentions || 'everyone',
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
@@ -366,10 +444,11 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     ...this.toPublicJSON(this._id),
     email: this.email,
     phone: this.phone || '',
+    birthday: this.birthday || null,
     emailVerified: Boolean(this.emailVerified),
     lastLoginAt: this.lastLoginAt,
     blockedUsers: Array.isArray(this.blockedUsers) ? this.blockedUsers.map((id) => String(id)) : [],
-    friends: Array.isArray(this.friends) ? this.friends.map((id) => String(id)) : [],   // ← add this line
+    friends: Array.isArray(this.friends) ? this.friends.map((id) => String(id)) : [],
     notificationSettings: normalizeNotificationSettings(this.notificationSettings),
     mutedChats: Array.isArray(this.mutedChats) ? this.mutedChats.map((m) => ({
       conversationKey: m.conversationKey,

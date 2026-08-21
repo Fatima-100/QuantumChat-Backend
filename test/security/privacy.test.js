@@ -155,3 +155,100 @@ test('call signal invitations enforce privacy settings', async () => {
   assert.equal(callResB.status, 201);
 });
 
+test('extended privacy settings validate enums and enforce profile, birthday, and group permissions', async () => {
+  // 1. Enum validation for new settings
+  const badSetting = await fetchJson(`${ctx.base}/users/me/privacy`, {
+    method: 'PATCH',
+    headers: authHeaders(userA.token),
+    body: JSON.stringify({ profileVisibility: 'invalid_enum' }),
+  });
+  assert.equal(badSetting.status, 400);
+
+  // 2. Set userA extended privacy: profileVisibility: 'friends', birthdayVisibility: 'onlyMe'
+  const updateRes = await fetchJson(`${ctx.base}/users/me/privacy`, {
+    method: 'PATCH',
+    headers: authHeaders(userA.token),
+    body: JSON.stringify({
+      profileVisibility: 'friends',
+      birthdayVisibility: 'onlyMe',
+      whoCanCreateGroupsWithMe: 'friends',
+      whoCanAddToGroups: 'friends',
+      whoCanInviteViaGroupLink: 'nobody',
+    }),
+  });
+  assert.equal(updateRes.status, 200);
+  assert.equal(updateRes.body.data.profileVisibility, 'friends');
+  assert.equal(updateRes.body.data.birthdayVisibility, 'onlyMe');
+
+  // 3. userB (friend) views userA -> profile bio visible, birthday hidden (onlyMe)
+  const getB = await fetchJson(`${ctx.base}/users/${userA.user.id}`, {
+    headers: authHeaders(userB.token),
+  });
+  assert.equal(getB.status, 200);
+  assert.equal(getB.body.data.birthday, null);
+
+  // userC (non-friend) views userA -> bio hidden (friends only)
+  const getC = await fetchJson(`${ctx.base}/users/${userA.user.id}`, {
+    headers: authHeaders(userC.token),
+  });
+  assert.equal(getC.status, 200);
+  assert.equal(getC.body.data.bio, '');
+
+  // 4. Group creation with userA by non-friend userC -> should be rejected (403)
+  const createGroupC = await fetchJson(`${ctx.base}/groups`, {
+    method: 'POST',
+    headers: authHeaders(userC.token),
+    body: JSON.stringify({
+      name: 'Blocked Group Creation',
+      memberIds: [userA.user.id],
+    }),
+  });
+  assert.equal(createGroupC.status, 403);
+
+  // Group creation with userA by friend userB -> succeeds (201)
+  const createGroupB = await fetchJson(`${ctx.base}/groups`, {
+    method: 'POST',
+    headers: authHeaders(userB.token),
+    body: JSON.stringify({
+      name: 'Allowed Group Creation',
+      memberIds: [userA.user.id],
+    }),
+  });
+  assert.equal(createGroupB.status, 201);
+  const groupId = createGroupB.body.data.id;
+
+  // 5. non-friend userC trying to add userA to another group -> rejected (403)
+  const createGroupC2 = await fetchJson(`${ctx.base}/groups`, {
+    method: 'POST',
+    headers: authHeaders(userC.token),
+    body: JSON.stringify({ name: 'Group C2' }),
+  });
+  assert.equal(createGroupC2.status, 201);
+  const groupC2Id = createGroupC2.body.data.id;
+
+  const addRes = await fetchJson(`${ctx.base}/groups/${groupC2Id}/members`, {
+    method: 'POST',
+    headers: authHeaders(userC.token),
+    body: JSON.stringify({ memberIds: [userA.user.id] }),
+  });
+  assert.equal(addRes.status, 403);
+
+  // 6. userA joining via link when whoCanInviteViaGroupLink: 'nobody' -> rejected (403)
+  // Enable invite link on groupC2
+  const inviteRes = await fetchJson(`${ctx.base}/groups/${groupC2Id}/invite`, {
+    method: 'POST',
+    headers: authHeaders(userC.token),
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(inviteRes.status, 200);
+  const code = inviteRes.body.data.inviteCode;
+
+  const joinRes = await fetchJson(`${ctx.base}/groups/join`, {
+    method: 'POST',
+    headers: authHeaders(userA.token),
+    body: JSON.stringify({ code }),
+  });
+  assert.equal(joinRes.status, 403);
+});
+
+
