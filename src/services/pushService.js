@@ -235,16 +235,25 @@ async function shouldSendPush(userId, payload) {
  */
 export async function notifyUser(userId, payload) {
   await initFromEnvAsync();
-  if (!pushReady) return;
+  if (!pushReady) {
+    console.error('[push] Push service is not ready');
+    return;
+  }
 
   const uid = toObjectId(userId);
-  if (!uid) return;
+  if (!uid) {
+    console.error('[push] Invalid user ID:', userId);
+    return;
+  }
 
   const allowed = await shouldSendPush(uid, payload).catch(() => true);
   if (!allowed) return;
 
   const subs = await PushSubscription.find({ user: uid });
-  if (!subs.length) return;
+   if (!subs.length) {
+    console.warn(`[push] No push subscriptions found for user ${uid}`);
+    return;
+  }
 
   // E2E: never put message plaintext or ciphertext into push payloads.
   const title = String(payload?.title || 'QuantumChat').slice(0, 64);
@@ -283,7 +292,25 @@ export async function notifyUser(userId, payload) {
       } catch (err) {
         const status = err?.statusCode || err?.status;
         if (status === 404 || status === 410) {
+          // Subscription no longer exists on the push service at all.
           await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
+        } else if (status === 403) {
+          // VAPID key mismatch — this subscription was created against a
+          // different keypair than the server currently signs with (e.g.
+          // after rotating/newly-configuring VAPID_PUBLIC_KEY/PRIVATE_KEY).
+          // It will never succeed again with the current keys, so it's just
+          // as dead as a 404/410 — clean it up the same way, but log it
+          // distinctly since the fix differs (client needs to re-subscribe).
+          console.error(
+            `[push] VAPID mismatch (HTTP 403) for user ${userId}, subscription ${sub._id} — removing stale subscription. ` +
+              'That account needs to click "Enable Browser Notifications" again to re-subscribe against the current server key.'
+          );
+          await PushSubscription.deleteOne({ _id: sub._id }).catch(() => {});
+        } else {
+          console.error(
+            `[push] sendNotification failed for user ${userId}, subscription ${sub._id}:`,
+            status ? `HTTP ${status}` : err?.message || err
+          );
         }
       }
     }),
