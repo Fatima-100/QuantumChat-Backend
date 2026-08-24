@@ -8,7 +8,7 @@ import User from '../models/User.js';
 import Group from '../models/Group.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
 import { notifyUser } from '../services/pushService.js';
-import { conversationKey } from '../utils/conversationKey.js';
+import { conversationKey, clearedAtFor, parseConversationKey } from '../utils/conversationKey.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
 import { toObjectId } from '../utils/toObjectId.js';
@@ -569,6 +569,17 @@ export async function getConversation(req, res) {
       filter.$and.push({ createdAt: { $lt: before } });
     }
 
+    // "Clear chat" watermark: hide messages this user cleared (those created at
+    // or before the clear moment). Per-user only — the peer's view is untouched,
+    // and new messages after the clear appear normally.
+    const dmClearedAt = clearedAtFor(
+      req.user.clearedConversations,
+      conversationKey({ from: req.user._id, to: peerOid })
+    );
+    if (dmClearedAt) {
+      filter.$and.push({ createdAt: { $gt: dmClearedAt } });
+    }
+
     const rows = await Message.find(filter)
       .sort({ createdAt: -1 })
       .limit(limit + 1)
@@ -705,6 +716,36 @@ export async function syncMessages(req, res) {
       }
       : { decoyFor: null };
 
+    // "Clear chat" watermarks. For each conversation this user has cleared,
+    // exclude messages created at or before the clear moment. Sync spans all of
+    // the caller's conversations, so this is a $nor of per-conversation
+    // (scope + createdAt<=clearedAt) clauses. Cleared messages never resurface
+    // through sync on any of the user's devices; newer messages are unaffected.
+    const myId = req.user._id;
+    const clearExclusions = [];
+    for (const entry of req.user.clearedConversations || []) {
+      const clearedAt = entry && entry.clearedAt ? new Date(entry.clearedAt) : null;
+      if (!clearedAt) continue;
+      const parts = parseConversationKey(entry.conversationKey);
+      if (!parts) continue;
+      if (parts.group) {
+        const gid = toObjectId(parts.group);
+        if (gid) clearExclusions.push({ group: gid, createdAt: { $lte: clearedAt } });
+      } else if (parts.dm) {
+        const peerRaw = parts.dm.find((id) => String(id) !== String(myId)) || parts.dm[0];
+        const peerOid = toObjectId(peerRaw);
+        if (peerOid) {
+          clearExclusions.push({
+            $or: [
+              { from: myId, to: peerOid },
+              { from: peerOid, to: myId },
+            ],
+            createdAt: { $lte: clearedAt },
+          });
+        }
+      }
+    }
+
     const filter = {
       $and: [
         {
@@ -717,6 +758,7 @@ export async function syncMessages(req, res) {
         { createdAt: { $gt: since } },
         notExpiredFilter(),
         scopeFilter,
+        ...(clearExclusions.length ? [{ $nor: clearExclusions }] : []),
       ],
     };
 

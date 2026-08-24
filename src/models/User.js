@@ -152,6 +152,19 @@ const mutedChatSchema = new mongoose.Schema(
   },
   { _id: false }
 );
+// Per-user "clear chat" watermark. When a user clears a conversation, we record
+// the moment here rather than deleting any shared message documents — clearing
+// is a *local* action that only hides messages from this user's own view, on all
+// their devices. Messages with createdAt <= clearedAt are hidden for this user in
+// that conversation; anything newer shows normally. This preserves E2E ciphertext,
+// never affects the peer or other group members, and never deletes the group.
+const clearedChatSchema = new mongoose.Schema(
+  {
+    conversationKey: { type: String, required: true },
+    clearedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
 const userSchema = new mongoose.Schema(
   {
     username: {
@@ -172,6 +185,17 @@ const userSchema = new mongoose.Schema(
       type: String,
       trim: true,
       maxlength: 300,
+      default: '',
+    },
+    /**
+     * Short, user-authored status line (e.g. "Busy studying", "In a meeting").
+     * Purely cosmetic and entirely separate from the technical online/offline
+     * presence state — the two coexist. Optional; empty string means "no status".
+     */
+    statusText: {
+      type: String,
+      trim: true,
+      maxlength: 100,
       default: '',
     },
     phone: {
@@ -290,6 +314,10 @@ const userSchema = new mongoose.Schema(
     },
     mutedChats: {
       type: [mutedChatSchema],
+      default: [],
+    },
+    clearedConversations: {
+      type: [clearedChatSchema],
       default: [],
     },
     blockedUsers: [
@@ -423,6 +451,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     id: this._id,
     username: this.username,
     displayName: this.displayName || '',
+    statusText: this.statusText || '',
     bio: showProfileDetails ? (this.bio || '') : '',
     phone: showProfileDetails ? (this.phone || '') : '',
     birthday: (showBirthday && this.birthday) ? this.birthday : null,
@@ -475,6 +504,10 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     mutedChats: Array.isArray(this.mutedChats) ? this.mutedChats.map((m) => ({
       conversationKey: m.conversationKey,
       expiresAt: m.expiresAt,
+    })) : [],
+    clearedConversations: Array.isArray(this.clearedConversations) ? this.clearedConversations.map((c) => ({
+      conversationKey: c.conversationKey,
+      clearedAt: c.clearedAt,
     })) : [],
     totpEnabled: Boolean(this.totpEnabled),
   };

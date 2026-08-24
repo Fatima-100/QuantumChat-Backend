@@ -12,7 +12,7 @@ import { toObjectId } from '../utils/toObjectId.js';
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
 const PUBLIC_FIELDS =
-  'username displayName bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+  'username displayName statusText bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
 
 
 export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
@@ -203,7 +203,7 @@ export async function updatePrivacy(req, res) {
 
 export async function updateProfile(req, res) {
   try {
-    const { displayName, bio, phone, username, privacy, dateOfBirth, timezone } = req.body || {};
+    const { displayName, statusText, bio, phone, username, privacy, dateOfBirth, timezone } = req.body || {};
     const user = req.user;
 
     if (username != null) {
@@ -228,6 +228,18 @@ export async function updateProfile(req, res) {
         return res.status(400).json({ success: false, error: 'Bio must be under 300 characters' });
       }
       user.bio = bio.trim();
+    }
+    // Custom status line. Never trust the client's length check: reject > 100
+    // chars server-side. An empty/whitespace-only value clears the status.
+    if (statusText != null) {
+      if (typeof statusText !== 'string') {
+        return res.status(400).json({ success: false, error: 'Status must be text' });
+      }
+      const trimmedStatus = statusText.trim();
+      if (trimmedStatus.length > 100) {
+        return res.status(400).json({ success: false, error: 'Status must be under 100 characters' });
+      }
+      user.statusText = trimmedStatus;
     }
     if (phone != null) {
       if (typeof phone !== 'string' || phone.length > 32) {
@@ -278,6 +290,21 @@ export async function updateProfile(req, res) {
     }
 
     await user.save();
+
+    // Real-time status propagation. This is deliberately separate from presence
+    // events and never touches online/offline state. Emit only when the client
+    // actually sent a status value, to the user's own devices (multi-device
+    // sync) and to friends (who see it near the name / in the profile).
+    // Non-friends pick it up on their next profile/user-list fetch.
+    if (statusText != null) {
+      const io = req.app.get('io');
+      if (io) {
+        const payload = { userId: String(user._id), statusText: user.statusText || '' };
+        const targets = new Set([String(user._id), ...(user.friends || []).map((f) => String(f._id || f))]);
+        for (const t of targets) io.to(t).emit('user:status', payload);
+      }
+    }
+
     res.json({ success: true, data: user.toSelfJSON() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -524,6 +551,71 @@ export async function unmuteChat(req, res) {
     const user = req.user;
     user.mutedChats = (user.mutedChats || []).filter((m) => m.conversationKey !== key);
     await user.save();
+
+    res.json({ success: true, data: user.toSelfJSON() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * Clear a conversation *for the calling user only*. This never deletes shared
+ * message documents — doing so would destroy the peer's or other group members'
+ * history and could not be safely scoped for groups. Instead we record a
+ * per-user watermark (clearedConversations) so this user's own views (on every
+ * device) hide messages at or before `clearedAt` for this one conversation.
+ * The conversation, contact, and group all stay in the list; sending new
+ * messages afterwards works normally. E2E ciphertext is untouched.
+ */
+export async function clearConversation(req, res) {
+  try {
+    const { peerId, groupId } = req.body || {};
+    if (!peerId && !groupId) {
+      return res.status(400).json({ success: false, error: 'peerId or groupId is required' });
+    }
+    if (peerId && groupId) {
+      return res.status(400).json({ success: false, error: 'Provide either peerId or groupId, not both' });
+    }
+
+    // For a group clear, confirm the caller is actually a member before we
+    // record a watermark. This is a per-user, view-only action — it can never
+    // delete the group or affect other members — but we still gate it so a
+    // non-member cannot set state against a group they cannot access.
+    if (groupId) {
+      const gid = toObjectId(groupId);
+      if (!gid) return res.status(400).json({ success: false, error: 'Invalid group id' });
+      const group = await Group.findById(gid).select('members');
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      if (!group.isMember(req.user._id)) {
+        return res.status(403).json({ success: false, error: 'Not a group member' });
+      }
+    } else {
+      const pid = toObjectId(peerId);
+      if (!pid) return res.status(400).json({ success: false, error: 'Invalid user id' });
+    }
+
+    const key = conversationKey(
+      groupId ? { group: groupId } : { from: req.user._id, to: peerId }
+    );
+    const clearedAt = new Date();
+
+    const user = req.user;
+    user.clearedConversations = (user.clearedConversations || []).filter((c) => c.conversationKey !== key);
+    user.clearedConversations.push({ conversationKey: key, clearedAt });
+    await user.save();
+
+    // Sync the clear across the user's own devices so a second logged-in
+    // session stops showing the now-hidden messages. Scoped to the caller's
+    // own room only — peers and other group members are never notified.
+    const io = req.app.get('io');
+    if (io) {
+      io.to(String(user._id)).emit('chat:cleared', {
+        conversationKey: key,
+        peerId: peerId ? String(peerId) : null,
+        groupId: groupId ? String(groupId) : null,
+        clearedAt,
+      });
+    }
 
     res.json({ success: true, data: user.toSelfJSON() });
   } catch (err) {

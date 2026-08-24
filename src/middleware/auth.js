@@ -59,7 +59,7 @@ export async function requireAuthLean(req, res, next) {
       return res.status(401).json({ success: false, error: '2FA verification required' });
     }
     const user = await User.findById(payload.id)
-      .select('_id username blockedUsers friends mutedChats notificationSettings vaultedPeers privacy publicKeys')
+      .select('_id username blockedUsers friends mutedChats clearedConversations notificationSettings vaultedPeers privacy publicKeys')
       .lean();
     if (!user) {
       return res.status(401).json({ success: false, error: 'User not found' });
