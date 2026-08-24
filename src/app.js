@@ -17,7 +17,7 @@ import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
-
+import activityRoutes from './routes/activityRoutes.js';
 export function createApp() {
   const app = express();
 
@@ -64,7 +64,7 @@ export function createApp() {
   );
 
   app.use(express.json({ limit: '100kb' }));
-
+app.use('/api/activity', activityRoutes);
   app.get('/api/health', (req, res) => res.json({ success: true, data: { status: 'ok' } }));
 
   // Serverless-safe trigger for the birthday-notification sweep. server.js's
