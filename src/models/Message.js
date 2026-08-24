@@ -12,6 +12,7 @@ const envelopeSchema = new mongoose.Schema(
   { _id: false }
 );
 
+
 const reactionSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -21,7 +22,13 @@ const reactionSchema = new mongoose.Schema(
   },
   { _id: false, timestamps: { createdAt: true, updatedAt: false } }
 );
-
+const deliveryReceiptSchema = new mongoose.Schema(
+  {
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    at: { type: Date, required: true },
+  },
+  { _id: false }
+);
 const memberEnvelopeSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -41,6 +48,16 @@ const pollVoteSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const editHistoryEntrySchema = new mongoose.Schema(
+  {
+    forRecipient: { type: envelopeSchema },
+    forSender: { type: envelopeSchema },
+    content: { type: String, maxlength: 8000 },
+    envelopes: { type: [memberEnvelopeSchema], default: undefined },
+    editedAt: { type: Date, required: true },
+  },
+  { _id: false }
+);
 const messageSchema = new mongoose.Schema(
   {
     from: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -55,8 +72,13 @@ const messageSchema = new mongoose.Schema(
     reactions: { type: [reactionSchema], default: [] },
     replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
     editedAt: { type: Date },
+    editHistory: { type: [editHistoryEntrySchema], default: undefined },
     deliveredAt: { type: Date },
     readAt: { type: Date },
+        // Group-only per-member delivery/read receipts. DMs keep using the
+    // single deliveredAt/readAt fields above — untouched.
+    deliveredTo: { type: [deliveryReceiptSchema], default: undefined },
+    readBy: { type: [deliveryReceiptSchema], default: undefined },
     kind: {
       type: String,
       enum: ['text', 'announcement', 'poll', 'event', 'file', 'ai', 'ai_note', 'system'],
@@ -80,13 +102,28 @@ const messageSchema = new mongoose.Schema(
       allowForward: { type: Boolean, default: true },
       forwardUntil: { type: Date, default: null },
     },
-    expiresAt: { type: Date, default: null, index: true },
+   expiresAt: { type: Date, default: null, index: true },
+    // WhatsApp-style view-once media: photo / video / voice can be opened once,
+    // then the ciphertext is purged and a tombstone remains.
+    viewOnce: { type: Boolean, default: false },
+    viewOnceMediaKind: {
+      type: String,
+      enum: ['image', 'video', 'audio'],
+      default: undefined,
+    },
+    viewOnceOpenedAt: { type: Date, default: null },
+    viewOnceOpenedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    // Vault decoy separation: when set, this message only belongs to the
+    // decoy thread for this user's locked vault view of the conversation.
+    // Never set for group messages. Plain metadata — does not touch the
+    // sealed envelopes/encryption at all.
+    decoyFor: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
   },
   { timestamps: true }
 );
-
 messageSchema.index({ from: 1, to: 1, createdAt: 1 });
 messageSchema.index({ group: 1, createdAt: 1 });
+messageSchema.index({ decoyFor: 1, from: 1, to: 1, createdAt: 1 });
 messageSchema.index({ 'aiMetadata.requestId': 1 }, { unique: true, sparse: true });
 messageSchema.index({ expiresAt: 1 }, { sparse: true });
 

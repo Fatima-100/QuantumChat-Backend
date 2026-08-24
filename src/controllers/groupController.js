@@ -6,7 +6,6 @@ import User from '../models/User.js';
 import Message from '../models/Message.js';
 import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
-import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
@@ -64,12 +63,27 @@ function toClientMessage(doc) {
   if (typeof message.content === 'string') {
     message.content = message.content;
   }
+    message.deliveredTo = (message.deliveredTo || []).map((d) => ({
+    user: d.user?.toString?.() || String(d.user),
+    at: d.at,
+  }));
+  message.readBy = (message.readBy || []).map((r) => ({
+    user: r.user?.toString?.() || String(r.user),
+    at: r.at,
+  }));
   message.mentionedUserIds = (message.mentionedUserIds || []).map((id) => String(id));
+  
   message.pollVotes = (message.pollVotes || []).map((v) => ({
     user: String(v.user),
     optionIndex: v.optionIndex,
   }));
   message.kind = message.kind || 'text';
+  if (message.viewOnceOpenedBy) {
+    message.viewOnceOpenedBy = message.viewOnceOpenedBy?.toString?.() || String(message.viewOnceOpenedBy);
+  }
+  if (message.viewOnce && message.viewOnceOpenedAt) {
+    message.attachment = null;
+  }
   return message;
 }
 
@@ -110,17 +124,26 @@ export async function createGroup(req, res) {
     const requestedIds = Array.isArray(memberIds) ? memberIds : [];
     const uniqueIds = [...new Set(requestedIds.map(String))].filter((id) => id !== req.user._id.toString());
 
-    if (visibility === 'private' && uniqueIds.length < 1) {
-      return res.status(400).json({ success: false, error: 'Select at least one other member' });
-    }
     if (uniqueIds.some((id) => !mongoose.isValidObjectId(id))) {
       return res.status(400).json({ success: false, error: 'Invalid member id' });
     }
 
     if (uniqueIds.length) {
-      const found = await User.find({ _id: { $in: uniqueIds } }).select('_id');
+      const found = await User.find({ _id: { $in: uniqueIds } }).select('_id privacy friends');
       if (found.length !== uniqueIds.length) {
         return res.status(400).json({ success: false, error: 'One or more members were not found' });
+      }
+      for (const targetUser of found) {
+        const createPolicy = targetUser.privacy?.whoCanCreateGroupsWithMe || 'everyone';
+        if (createPolicy === 'friends') {
+          const isFriend = (targetUser.friends || []).some((f) => String(f) === String(req.user._id));
+          if (!isFriend) {
+            return res.status(403).json({
+              success: false,
+              error: 'One or more users do not accept group creation from non-friends',
+            });
+          }
+        }
       }
     }
 
@@ -477,6 +500,24 @@ export async function joinViaInvite(req, res) {
       const populated = await loadGroup(group._id);
       return res.json({ success: true, data: populated.toPublicJSON(), alreadyMember: true });
     }
+    const linkPolicy = req.user.privacy?.whoCanInviteViaGroupLink || 'everyone';
+    if (linkPolicy === 'nobody') {
+      return res.status(403).json({
+        success: false,
+        error: 'Your privacy settings prevent joining groups via invite link',
+      });
+    }
+    if (linkPolicy === 'friends') {
+      const adminIds = (group.admins?.length ? group.admins : [group.createdBy]).map(String);
+      const userFriends = (req.user.friends || []).map(String);
+      const isFriendOfAdmin = adminIds.some((adminId) => userFriends.includes(adminId));
+      if (!isFriendOfAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: 'Joining via link requires being friends with a group admin',
+        });
+      }
+    }
     group.members.push(req.user._id);
     await group.save();
     const populated = await loadGroup(group._id);
@@ -694,9 +735,27 @@ export async function addMembers(req, res) {
     if (toAdd.length === 0) {
       return res.status(400).json({ success: false, error: 'No new members to add' });
     }
-    const found = await User.find({ _id: { $in: toAdd } }).select('_id');
+    const found = await User.find({ _id: { $in: toAdd } }).select('_id privacy friends');
     if (found.length !== toAdd.length) {
       return res.status(400).json({ success: false, error: 'One or more members were not found' });
+    }
+    for (const targetUser of found) {
+      const addPolicy = targetUser.privacy?.whoCanAddToGroups || 'everyone';
+      if (addPolicy === 'nobody') {
+        return res.status(403).json({
+          success: false,
+          error: 'One or more users do not accept group invites',
+        });
+      }
+      if (addPolicy === 'friends') {
+        const isFriend = (targetUser.friends || []).some((f) => String(f) === String(req.user._id));
+        if (!isFriend) {
+          return res.status(403).json({
+            success: false,
+            error: 'One or more users only allow friends to add them to groups',
+          });
+        }
+      }
     }
     group.members.push(...toAdd);
     await group.save();
@@ -916,6 +975,7 @@ export async function sendGroupMessage(req, res) {
       mentionedUserIds,
       expiresInSeconds,
       forwardPolicy: forwardPolicyRaw,
+      viewOnce: viewOnceRaw,
     } = req.body;
     if (!mongoose.isValidObjectId(groupId)) {
       return res.status(400).json({ success: false, error: 'Invalid group id' });
@@ -1007,9 +1067,27 @@ export async function sendGroupMessage(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid attachment id' });
     }
 
-    const mentions = [...new Set((mentionedUserIds || []).map(String))].filter(
+    const initialMentions = [...new Set((mentionedUserIds || []).map(String))].filter(
       (mid) => memberSet.has(mid) && mongoose.isValidObjectId(mid)
     );
+    let mentions = [];
+    if (initialMentions.length) {
+      const senderIsAdmin = group.isAdmin(req.user._id);
+      const mentionedUsers = await User.find({ _id: { $in: initialMentions } }).select('privacy friends');
+      for (const targetUser of mentionedUsers) {
+        const groupPolicy = targetUser.privacy?.groupMentions || 'everyone';
+        if (groupPolicy === 'nobody') continue;
+        if (groupPolicy === 'adminsOnly' && !senderIsAdmin) continue;
+
+        const generalPolicy = targetUser.privacy?.whoCanMention || 'everyone';
+        if (generalPolicy === 'nobody') continue;
+        if (generalPolicy === 'friends') {
+          const isFriend = (targetUser.friends || []).some((f) => String(f) === String(req.user._id));
+          if (!isFriend) continue;
+        }
+        mentions.push(String(targetUser._id));
+      }
+    }
 
     let forwardPolicy;
     if (forwardPolicyRaw != null && typeof forwardPolicyRaw === 'object') {
@@ -1028,6 +1106,35 @@ export async function sendGroupMessage(req, res) {
       forwardPolicy = { allowForward, ...(forwardUntil ? { forwardUntil } : {}) };
     }
 
+    let viewOnce = viewOnceRaw === true;
+    let viewOnceMediaKind;
+    if (viewOnce) {
+      const viewOnceAttachmentOid = toObjectId(attachmentId);
+      if (!viewOnceAttachmentOid) {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      const Attachment = (await import('../models/Attachment.js')).default;
+      const attachment = await Attachment.findById(viewOnceAttachmentOid);
+      const mime = String(attachment?.mimetype || '').toLowerCase();
+      const name = String(attachment?.filename || '').toLowerCase();
+      if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
+        viewOnceMediaKind = 'audio';
+      } else if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) {
+        viewOnceMediaKind = 'image';
+      } else if (mime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) {
+        viewOnceMediaKind = 'video';
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      forwardPolicy = { allowForward: false };
+    }
+
     const created = await Message.create({
       from: req.user._id,
       group: group._id,
@@ -1039,6 +1146,7 @@ export async function sendGroupMessage(req, res) {
       pollVotes: messageKind === 'poll' ? [] : undefined,
       expiresAt: expiresAt || undefined,
       ...(forwardPolicy ? { forwardPolicy } : {}),
+      ...(viewOnce ? { viewOnce: true, viewOnceMediaKind } : {}),
     });
 
     group.updatedAt = new Date();
@@ -1062,12 +1170,14 @@ export async function sendGroupMessage(req, res) {
     const senderId = String(req.user._id);
     for (const mid of memberSet) {
       if (mid === senderId) continue;
-      if (!isUserOnline(mid)) {
-        notifyUser(mid, {
-          title: 'QuantumChat',
-          body: isPublic ? 'New public group message' : 'New group message',
-        }).catch(() => {});
-      }
+      notifyUser(mid, {
+        title: 'QuantumChat',
+        body: isPublic ? 'New public group message' : 'New group message',
+        kind: 'group',
+        isMention: mentions.map(String).includes(String(mid)),
+        conversationKey: `group:${groupId}`,
+        url: `/chat/g/${groupId}`,
+      }).catch(() => {});
     }
 
     if (!isPublic) incrementCiphertextsRelayed();
@@ -1217,6 +1327,34 @@ export async function getGroupMessages(req, res) {
     const page = hasMore ? rows.slice(0, limit) : rows;
     page.reverse();
 
+    const now = new Date();
+    const uid = req.user._id;
+    const undeliveredIds = page
+      .filter(
+        (msg) =>
+          String(msg.from) !== String(uid) &&
+          !(msg.deliveredTo || []).some((d) => String(d.user) === String(uid))
+      )
+      .map((msg) => msg._id);
+
+    if (undeliveredIds.length) {
+      await Message.updateMany(
+        { _id: { $in: undeliveredIds }, 'deliveredTo.user': { $ne: uid } },
+        { $push: { deliveredTo: { user: uid, at: now } } }
+      );
+      for (const msg of page) {
+        if (undeliveredIds.some((id) => String(id) === String(msg._id))) {
+          msg.deliveredTo = [...(msg.deliveredTo || []), { user: uid, at: now }];
+        }
+      }
+      req.app.get('io')?.to(`group:${groupOid}`).emit('message:status', {
+        groupId: String(groupOid),
+        userId: String(uid),
+        messageIds: undeliveredIds.map(String),
+        deliveredAt: now,
+      });
+    }
+
     res.json({
       success: true,
       data: page.map(toClientMessage),
@@ -1225,6 +1363,55 @@ export async function getGroupMessages(req, res) {
         nextBefore: page.length ? page[0].createdAt : null,
       },
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function markGroupMessagesRead(req, res) {
+  try {
+    const { groupId } = req.params;
+    const groupOid = toObjectId(groupId);
+    if (!groupOid) {
+      return res.status(400).json({ success: false, error: 'Invalid group id' });
+    }
+    const group = await Group.findById(groupOid).select('members');
+    if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+    if (!group.isMember(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not a group member' });
+    }
+
+    const uid = req.user._id;
+    const now = new Date();
+
+    const unread = await Message.find({
+      group: groupOid,
+      from: { $ne: uid },
+      'readBy.user': { $ne: uid },
+    }).select('_id');
+    const unreadIds = unread.map((m) => m._id);
+    if (!unreadIds.length) {
+      return res.json({ success: true, data: { updated: 0 } });
+    }
+
+    await Message.updateMany(
+      { _id: { $in: unreadIds }, 'deliveredTo.user': { $ne: uid } },
+      { $push: { deliveredTo: { user: uid, at: now } } }
+    );
+    await Message.updateMany(
+      { _id: { $in: unreadIds }, 'readBy.user': { $ne: uid } },
+      { $push: { readBy: { user: uid, at: now } } }
+    );
+
+    req.app.get('io')?.to(`group:${groupOid}`).emit('message:status', {
+      groupId: String(groupOid),
+      userId: String(uid),
+      messageIds: unreadIds.map(String),
+      deliveredAt: now,
+      readAt: now,
+    });
+
+    res.json({ success: true, data: { updated: unreadIds.length } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

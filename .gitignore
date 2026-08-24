@@ -13,3 +13,6 @@ quantum-chat.json
 # Local blob storage (dev fallback when Google Drive is unset)
 uploads/
 !uploads/.gitkeep
+
+# Auto-generated Web Push VAPID keys (use .env in production)
+data/vapid-keys.json

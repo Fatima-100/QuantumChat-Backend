@@ -19,7 +19,14 @@ export function buildMongoUri() {
   return `mongodb+srv://${user}:${password}@${MONGODB_CLUSTER}/${MONGODB_DB || ''}?retryWrites=true&w=majority&appName=Cluster0`;
 }
 
+export function resetConnectionPromise() {
+  connectionPromise = undefined;
+}
+
 export function connectDB() {
+  if (mongoose.connection.readyState === 0) {
+    connectionPromise = undefined;
+  }
   if (!connectionPromise) {
     const uri = buildMongoUri();
     connectionPromise = mongoose

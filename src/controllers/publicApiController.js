@@ -2,7 +2,6 @@ import Message from '../models/Message.js';
 import User from '../models/User.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
 import { ensureQuantumLogicsSystemUser } from '../services/quantumLogicsSystemUser.js';
-import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
@@ -80,9 +79,7 @@ export async function sendSystemMessage(req, res) {
         id: message._id,
       });
     }
-    if (!isUserOnline(recipient._id)) {
-      notifyUser(recipient._id, { title: 'QuantumChat', body: 'New message' }).catch(() => {});
-    }
+    notifyUser(recipient._id, { title: 'QuantumChat', body: 'New message' }).catch(() => {});
 
     return res.status(201).json({
       success: true,

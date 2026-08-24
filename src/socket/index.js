@@ -1,6 +1,9 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
-import { isSealedEnvelope } from '../utils/callEnvelope.js';
+import DeviceSession from '../models/DeviceSession.js';
+import { isSealedEnvelope, canUserInviteToCall } from '../utils/callEnvelope.js';
+import { canViewerSeeUserOnline } from '../utils/presencePrivacy.js';
+import { notifyUser } from '../services/pushService.js';
 
 const onlineUsers = new Map(); // userId -> Set(socketId)
 
@@ -28,12 +31,63 @@ export function getOnlineUserIds() {
   return [...onlineUsers.keys()];
 }
 
-async function canBroadcastOnline(userId) {
+export { canViewerSeeUserOnline } from '../utils/presencePrivacy.js';
+
+async function broadcastPresence(io, userId, isOnline, lastLoginAtIso) {
   try {
-    const user = await User.findById(userId).select('privacy');
-    return user?.privacy?.online !== 'nobody';
+    const user = await User.findById(userId).select('privacy friends');
+    if (!user) return;
+
+    const privacy = user.privacy || {};
+    let setting = privacy.onlineStatus;
+    if (!setting) {
+      setting = privacy.online === 'nobody' ? 'selected' : (privacy.online || 'everyone');
+    }
+
+    if (setting === 'nobody') return;
+
+    const friendIds = (user.friends || []).map((f) => String(f._id || f));
+    const showLastSeenEveryone = (privacy.lastSeen || 'everyone') === 'everyone';
+
+    if (setting === 'everyone') {
+      const globalPayload = {
+        userId,
+        online: isOnline,
+        ...(showLastSeenEveryone && lastLoginAtIso ? { lastLoginAt: lastLoginAtIso } : {}),
+      };
+      io.emit('presence:update', globalPayload);
+
+      if (lastLoginAtIso && privacy.lastSeen === 'friends') {
+        for (const fId of friendIds) {
+          io.to(fId).emit('presence:update', { userId, online: isOnline, lastLoginAt: lastLoginAtIso });
+        }
+      }
+    } else if (setting === 'friends') {
+      const targetIds = new Set([userId, ...friendIds]);
+      for (const tId of targetIds) {
+        const isFriend = friendIds.includes(tId) || tId === userId;
+        const showLastSeen = privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
+        io.to(tId).emit('presence:update', {
+          userId,
+          online: isOnline,
+          ...(showLastSeen && lastLoginAtIso ? { lastLoginAt: lastLoginAtIso } : {}),
+        });
+      }
+    } else if (setting === 'selected') {
+      const visibleTo = (privacy.onlineStatusVisibleTo || []).map((u) => String(u._id || u));
+      const targetIds = new Set([userId, ...visibleTo]);
+      for (const tId of targetIds) {
+        const isFriend = friendIds.includes(tId) || tId === userId;
+        const showLastSeen = privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
+        io.to(tId).emit('presence:update', {
+          userId,
+          online: isOnline,
+          ...(showLastSeen && lastLoginAtIso ? { lastLoginAt: lastLoginAtIso } : {}),
+        });
+      }
+    }
   } catch {
-    return true;
+    // ignore
   }
 }
 
@@ -44,11 +98,22 @@ export function attachSocket(io) {
       if (!token) return next(new Error('Missing auth token'));
 
       const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      if (payload.purpose === '2fa') return next(new Error('2FA verification required'));
       const user = await User.findById(payload.id);
       if (!user) return next(new Error('User not found'));
 
+      if (payload.sessionId) {
+        const session = await DeviceSession.findOne({
+          user: user._id,
+          sessionId: String(payload.sessionId),
+          revokedAt: null,
+        });
+        if (!session) return next(new Error('Session revoked or invalid'));
+        socket.sessionId = session.sessionId;
+      }
+
       socket.userId = user._id.toString();
-      socket.privacyOnline = user.privacy?.online !== 'nobody';
+      socket.typingIndicatorEnabled = user.privacy?.typingIndicator !== false;
       next();
     } catch (err) {
       next(new Error('Invalid or expired token'));
@@ -61,20 +126,43 @@ export function attachSocket(io) {
     setOnline(userId, socket.id);
 
     (async () => {
-      const visible = socket.privacyOnline ?? (await canBroadcastOnline(userId));
-      if (visible) {
-        io.emit('presence:update', { userId, online: true });
-      }
-      // Snapshot only includes users who allow online visibility
+      await broadcastPresence(io, userId, true);
+
       const ids = getOnlineUserIds();
-      const users = await User.find({ _id: { $in: ids } }).select('privacy');
-      const visibleIds = users
-        .filter((u) => u.privacy?.online !== 'nobody')
-        .map((u) => String(u._id));
-      socket.emit('presence:snapshot', { onlineUserIds: visibleIds });
+      if (ids.length) {
+        const users = await User.find({ _id: { $in: ids } }).select('privacy friends');
+        const visibleIds = users
+          .filter((u) => canViewerSeeUserOnline(u, userId))
+          .map((u) => String(u._id));
+        socket.emit('presence:snapshot', { onlineUserIds: visibleIds });
+      } else {
+        socket.emit('presence:snapshot', { onlineUserIds: [] });
+      }
     })();
 
+    async function sendPresenceSnapshot() {
+      const ids = getOnlineUserIds();
+      if (!ids.length) {
+        socket.emit('presence:snapshot', { onlineUserIds: [] });
+        return;
+      }
+      try {
+        const users = await User.find({ _id: { $in: ids } }).select('privacy friends');
+        const visibleIds = users
+          .filter((u) => canViewerSeeUserOnline(u, userId))
+          .map((u) => String(u._id));
+        socket.emit('presence:snapshot', { onlineUserIds: visibleIds });
+      } catch {
+        socket.emit('presence:snapshot', { onlineUserIds: [] });
+      }
+    }
+
+    socket.on('presence:request', () => {
+      sendPresenceSnapshot();
+    });
+
     socket.on('typing:start', ({ to, groupId } = {}) => {
+      if (socket.typingIndicatorEnabled === false) return;
       if (groupId) {
         io.to(`group:${String(groupId)}`).emit('typing:start', { from: userId, groupId: String(groupId) });
         return;
@@ -84,12 +172,19 @@ export function attachSocket(io) {
     });
 
     socket.on('typing:stop', ({ to, groupId } = {}) => {
+      if (socket.typingIndicatorEnabled === false) return;
       if (groupId) {
         io.to(`group:${String(groupId)}`).emit('typing:stop', { from: userId, groupId: String(groupId) });
         return;
       }
       if (!to) return;
       io.to(String(to)).emit('typing:stop', { from: userId });
+    });
+
+    socket.on('privacy:typing-indicator', ({ enabled } = {}) => {
+      if (typeof enabled === 'boolean') {
+        socket.typingIndicatorEnabled = enabled;
+      }
     });
 
     socket.on('group:join', ({ groupId } = {}) => {
@@ -102,22 +197,33 @@ export function attachSocket(io) {
       socket.leave(`group:${String(groupId)}`);
     });
 
-    // WebRTC signaling — media is P2P; SDP/ICE must be X5 sealed envelopes only.
-    // Shared by 1:1 calls (call:*) and group meetings (meeting:*) — a meeting
-    // reuses the same `callId` wire field to carry its meetingId, so no
-    // separate identifier concept/schema is needed. The bot never holds
-    // roster/membership state, it just blindly relays sealed envelopes to a
-    // target user's room.
-    function relaySealedEnvelope(eventName, payload = {}) {
+    async function relaySealedEnvelope(eventName, payload = {}) {
       const { to, callId, envelope } = payload;
       if (!to || !callId) return;
       if (payload.sdp != null || payload.candidate != null) return;
       if (!isSealedEnvelope(envelope)) return;
+
+      if (eventName === 'call:invite' || eventName === 'meeting:invite') {
+        const allowed = await canUserInviteToCall(userId, to);
+        if (!allowed) return;
+      }
+
       io.to(String(to)).emit(eventName, {
         from: userId,
         callId: String(callId),
         envelope,
       });
+      if (eventName === 'call:invite' || eventName === 'meeting:invite') {
+        const isMeeting = eventName === 'meeting:invite';
+        notifyUser(to, {
+          title: 'QuantumChat',
+          body: isMeeting ? 'Incoming meeting' : 'Incoming call',
+          kind: 'call',
+          tag: `${isMeeting ? 'meeting' : 'call'}:${callId}`,
+          url: '/chat',
+          requireInteraction: true,
+        }).catch(() => {});
+      }
     }
 
     socket.on('call:invite', (payload = {}) => relaySealedEnvelope('call:invite', payload));
@@ -135,13 +241,31 @@ export function attachSocket(io) {
     socket.on('meeting:offer', (payload = {}) => relaySealedEnvelope('meeting:offer', payload));
     socket.on('meeting:answer', (payload = {}) => relaySealedEnvelope('meeting:answer', payload));
     socket.on('meeting:ice', (payload = {}) => relaySealedEnvelope('meeting:ice', payload));
-
     socket.on('message:delivered', async ({ messageId } = {}) => {
       try {
         if (!messageId) return;
         const Message = (await import('../models/Message.js')).default;
         const msg = await Message.findById(messageId);
-        if (!msg || msg.group) return;
+        if (!msg) return;
+
+        if (msg.group) {
+          if (String(msg.from) === userId) return;
+          const already = (msg.deliveredTo || []).some((d) => String(d.user) === userId);
+          if (already) return;
+          const now = new Date();
+          await Message.updateOne(
+            { _id: msg._id, 'deliveredTo.user': { $ne: userId } },
+            { $push: { deliveredTo: { user: userId, at: now } } }
+          );
+          io.to(`group:${String(msg.group)}`).emit('message:status', {
+            groupId: String(msg.group),
+            userId,
+            messageIds: [String(msg._id)],
+            deliveredAt: now,
+          });
+          return;
+        }
+
         if (String(msg.to) !== userId) return;
         if (msg.deliveredAt) return;
         msg.deliveredAt = new Date();
@@ -162,15 +286,13 @@ export function attachSocket(io) {
       socket.leave(userId);
       const wentOffline = setOffline(userId, socket.id);
       if (wentOffline) {
+        const lastLoginAt = new Date();
         try {
-          await User.findByIdAndUpdate(userId, { lastLoginAt: new Date() });
+          await User.findByIdAndUpdate(userId, { lastLoginAt });
         } catch {
           // ignore
         }
-        const visible = await canBroadcastOnline(userId);
-        if (visible) {
-          io.emit('presence:update', { userId, online: false, lastLoginAt: new Date().toISOString() });
-        }
+        await broadcastPresence(io, userId, false, lastLoginAt.toISOString());
       }
     });
   });

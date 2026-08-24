@@ -5,13 +5,15 @@ import Group from '../models/Group.js';
 import Message from '../models/Message.js';
 import User, { KEY_SET_SIZE } from '../models/User.js';
 import { conversationKey } from '../utils/conversationKey.js';
+import { normalizeNotificationSettings } from '../utils/notificationSettings.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
 const PUBLIC_FIELDS =
-  'username displayName bio phone email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+  'username displayName bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+
 
 export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
   const aId = toObjectId(userAId);
@@ -106,11 +108,102 @@ export async function getUser(req, res) {
   if (await areUsersBlocked(req.user._id, user._id)) {
     return res.status(403).json({ success: false, error: 'User is blocked' });
   }
-  res.json({ success: true, data: user.toPublicJSON() });
+  res.json({ success: true, data: user.toPublicJSON(req.user._id) });
 }
+
+export async function updatePrivacy(req, res) {
+  try {
+    const {
+      lastSeen,
+      readReceipts,
+      onlineStatus,
+      onlineStatusVisibleTo,
+      whoCanMessage,
+      discoverable,
+      story,
+      storyViewers,
+      typingIndicator,
+      profileVisibility,
+      birthdayVisibility,
+      whoCanMention,
+      whoCanAddToGroups,
+      whoCanInviteViaGroupLink,
+      whoCanCreateGroupsWithMe,
+      groupMentions,
+      screenshotProtection,
+    } = req.body || {};
+
+    if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
+      return res.status(400).json({ success: false, error: 'Invalid lastSeen privacy setting' });
+    }
+    if (
+      readReceipts !== undefined &&
+      typeof readReceipts !== 'boolean' &&
+      !['everyone', 'friends', 'nobody'].includes(readReceipts)
+    ) {
+      return res.status(400).json({ success: false, error: 'Invalid readReceipts privacy setting' });
+    }
+    if (typingIndicator !== undefined && typeof typingIndicator !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Invalid typingIndicator privacy setting' });
+    }
+    if (screenshotProtection !== undefined && typeof screenshotProtection !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Invalid screenshotProtection privacy setting' });
+    }
+    if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
+      return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
+    }
+    if (onlineStatusVisibleTo !== undefined && !Array.isArray(onlineStatusVisibleTo)) {
+      return res.status(400).json({ success: false, error: 'onlineStatusVisibleTo must be an array of user IDs' });
+    }
+    if (whoCanMessage !== undefined && !['everyone', 'friends', 'friendsOfFriends'].includes(whoCanMessage)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanMessage privacy setting' });
+    }
+    if (discoverable !== undefined && !['everyone', 'nobody'].includes(discoverable)) {
+      return res.status(400).json({ success: false, error: 'Invalid discoverable privacy setting' });
+    }
+    if (story !== undefined && !['everyone', 'friends', 'nobody', 'selected'].includes(story)) {
+      return res.status(400).json({ success: false, error: 'Invalid story privacy setting' });
+    }
+    if (storyViewers !== undefined && !Array.isArray(storyViewers)) {
+      return res.status(400).json({ success: false, error: 'storyViewers must be an array of user IDs' });
+    }
+    if (profileVisibility !== undefined && !['everyone', 'friends', 'onlyMe'].includes(profileVisibility)) {
+      return res.status(400).json({ success: false, error: 'Invalid profileVisibility privacy setting' });
+    }
+    if (birthdayVisibility !== undefined && !['everyone', 'friends', 'onlyMe'].includes(birthdayVisibility)) {
+      return res.status(400).json({ success: false, error: 'Invalid birthdayVisibility privacy setting' });
+    }
+    if (whoCanMention !== undefined && !['everyone', 'friends', 'nobody'].includes(whoCanMention)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanMention privacy setting' });
+    }
+    if (whoCanAddToGroups !== undefined && !['everyone', 'friends', 'nobody'].includes(whoCanAddToGroups)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanAddToGroups privacy setting' });
+    }
+    if (whoCanInviteViaGroupLink !== undefined && !['everyone', 'friends', 'nobody'].includes(whoCanInviteViaGroupLink)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanInviteViaGroupLink privacy setting' });
+    }
+    if (whoCanCreateGroupsWithMe !== undefined && !['everyone', 'friends'].includes(whoCanCreateGroupsWithMe)) {
+      return res.status(400).json({ success: false, error: 'Invalid whoCanCreateGroupsWithMe privacy setting' });
+    }
+    if (groupMentions !== undefined && !['everyone', 'adminsOnly', 'nobody'].includes(groupMentions)) {
+      return res.status(400).json({ success: false, error: 'Invalid groupMentions privacy setting' });
+    }
+
+    const user = req.user;
+    applyPrivacyPatch(user, req.body || {});
+    user.markModified('privacy');
+    await user.save();
+    const self = user.toSelfJSON();
+    res.json({ success: true, data: self.privacy, user: self });
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ success: false, error: err.message });
+  }
+}
+
 export async function updateProfile(req, res) {
   try {
-    const { displayName, bio, phone, username, privacy } = req.body || {};
+    const { displayName, bio, phone, username, privacy, dateOfBirth, timezone } = req.body || {};
     const user = req.user;
 
     if (username != null) {
@@ -146,6 +239,40 @@ export async function updateProfile(req, res) {
       }
       user.phone = normalized;
     }
+    if (dateOfBirth != null) {
+      if (dateOfBirth === '') {
+        user.dateOfBirth = null; // explicit clear
+      } else {
+        const parsed = new Date(dateOfBirth);
+        if (Number.isNaN(parsed.getTime())) {
+          return res.status(400).json({ success: false, error: 'Enter a valid date of birth' });
+        }
+        if (parsed > new Date()) {
+          return res.status(400).json({ success: false, error: 'Date of birth cannot be in the future' });
+        }
+        // Reset the "already notified this year" guard whenever the date changes,
+        // so a corrected birthday isn't silently skipped for the rest of the year.
+        user.lastBirthdayNotifiedYear = null;
+        user.dateOfBirth = parsed;
+      }
+    }
+     if (timezone != null) {
+      const tz = String(timezone).trim().slice(0, 64);
+      if (tz) {
+        try {
+          Intl.DateTimeFormat(undefined, { timeZone: tz }); // throws on invalid IANA name
+          if (tz !== user.timezone) {
+            // Same reasoning as the dateOfBirth reset above — a timezone
+            // change shifts when "local midnight" actually falls, so don't
+            // let a stale guard from the old zone skip this year's notice.
+            user.lastBirthdayNotifiedYear = null;
+          }
+          user.timezone = tz;
+        } catch {
+          return res.status(400).json({ success: false, error: 'Invalid timezone' });
+        }
+      }
+    }
     if (privacy && typeof privacy === 'object') {
       applyPrivacyPatch(user, privacy);
     }
@@ -154,20 +281,6 @@ export async function updateProfile(req, res) {
     res.json({ success: true, data: user.toSelfJSON() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
-  }
-}
-
-/** Dedicated privacy settings endpoint used by Settings → Privacy. */
-export async function updatePrivacy(req, res) {
-  try {
-    const user = req.user;
-    applyPrivacyPatch(user, req.body || {});
-    await user.save();
-    const self = user.toSelfJSON();
-    res.json({ success: true, data: self.privacy, user: self });
-  } catch (err) {
-    const status = err.status || 500;
-    res.status(status).json({ success: false, error: err.message });
   }
 }
 
@@ -181,6 +294,13 @@ function applyPrivacyPatch(user, privacy) {
   const whoOk = ['everyone', 'friends', 'friendsOfFriends'];
   const storyOk = ['everyone', 'friends', 'nobody', 'selected']; 
   const discoverOk = ['everyone', 'nobody'];
+  const profileVisibilityOk = ['everyone', 'friends', 'onlyMe'];
+  const birthdayVisibilityOk = ['everyone', 'friends', 'onlyMe'];
+  const whoCanMentionOk = ['everyone', 'friends', 'nobody'];
+  const whoCanAddToGroupsOk = ['everyone', 'friends', 'nobody'];
+  const whoCanInviteViaGroupLinkOk = ['everyone', 'friends', 'nobody'];
+  const whoCanCreateGroupsWithMeOk = ['everyone', 'friends'];
+  const groupMentionsOk = ['everyone', 'adminsOnly', 'nobody'];
 
   if (lastSeenOk.includes(privacy.lastSeen)) {
     user.privacy.lastSeen = privacy.lastSeen;
@@ -190,6 +310,14 @@ function applyPrivacyPatch(user, privacy) {
     user.privacy.readReceipts = privacy.readReceipts ? 'everyone' : 'nobody';
   } else if (readOk.includes(privacy.readReceipts)) {
     user.privacy.readReceipts = privacy.readReceipts;
+  }
+
+  if (typeof privacy.typingIndicator === 'boolean') {
+    user.privacy.typingIndicator = privacy.typingIndicator;
+  }
+
+  if (typeof privacy.screenshotProtection === 'boolean') {
+    user.privacy.screenshotProtection = privacy.screenshotProtection;
   }
 
   if (onlineStatusOk.includes(privacy.onlineStatus)) {
@@ -219,7 +347,7 @@ function applyPrivacyPatch(user, privacy) {
   if (discoverOk.includes(privacy.discoverable)) {
     user.privacy.discoverable = privacy.discoverable;
   }
-  // --- Story privacy (new) ---
+  // --- Story privacy ---
   if (storyOk.includes(privacy.story)) {
     user.privacy.story = privacy.story;
   }
@@ -232,10 +360,32 @@ function applyPrivacyPatch(user, privacy) {
     }
     user.privacy.storyViewers = next;
   }
+  if (profileVisibilityOk.includes(privacy.profileVisibility)) {
+    user.privacy.profileVisibility = privacy.profileVisibility;
+  }
+  if (birthdayVisibilityOk.includes(privacy.birthdayVisibility)) {
+    user.privacy.birthdayVisibility = privacy.birthdayVisibility;
+  }
+  if (whoCanMentionOk.includes(privacy.whoCanMention)) {
+    user.privacy.whoCanMention = privacy.whoCanMention;
+  }
+  if (whoCanAddToGroupsOk.includes(privacy.whoCanAddToGroups)) {
+    user.privacy.whoCanAddToGroups = privacy.whoCanAddToGroups;
+  }
+  if (whoCanInviteViaGroupLinkOk.includes(privacy.whoCanInviteViaGroupLink)) {
+    user.privacy.whoCanInviteViaGroupLink = privacy.whoCanInviteViaGroupLink;
+  }
+  if (whoCanCreateGroupsWithMeOk.includes(privacy.whoCanCreateGroupsWithMe)) {
+    user.privacy.whoCanCreateGroupsWithMe = privacy.whoCanCreateGroupsWithMe;
+  }
+  if (groupMentionsOk.includes(privacy.groupMentions)) {
+    user.privacy.groupMentions = privacy.groupMentions;
+  }
 }
+
 export async function getNotificationSettings(req, res) {
   try {
-    res.json({ success: true, data: req.user.notificationSettings || {} });
+    res.json({ success: true, data: normalizeNotificationSettings(req.user.notificationSettings) });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -245,7 +395,10 @@ export async function updateNotificationSettings(req, res) {
   try {
     const settings = req.body || {};
     const user = req.user;
-    user.notificationSettings = user.notificationSettings || {};
+    // Ensure a real nested subdoc exists so Mongoose change tracking works.
+    if (!user.notificationSettings || typeof user.notificationSettings !== 'object') {
+      user.notificationSettings = {};
+    }
 
     const enums = {
       messageNotifications: ['all', 'direct_only', 'all_except_reactions'],
@@ -266,12 +419,19 @@ export async function updateNotificationSettings(req, res) {
     if (typeof settings.soundEnabled === 'boolean') {
       user.notificationSettings.soundEnabled = settings.soundEnabled;
     }
+    if (typeof settings.birthdayReminders === 'boolean') {
+      user.notificationSettings.birthdayReminders = settings.birthdayReminders;
+    }
     if (typeof settings.soundVolume === 'number' && settings.soundVolume >= 0 && settings.soundVolume <= 100) {
       user.notificationSettings.soundVolume = settings.soundVolume;
     }
 
     if (settings.doNotDisturb && typeof settings.doNotDisturb === 'object') {
-      const dnd = user.notificationSettings.doNotDisturb || {};
+      const dnd = {
+        ...(user.notificationSettings.doNotDisturb?.toObject?.() ||
+          user.notificationSettings.doNotDisturb ||
+          {}),
+      };
       if (typeof settings.doNotDisturb.enabled === 'boolean') dnd.enabled = settings.doNotDisturb.enabled;
       if (typeof settings.doNotDisturb.startTime === 'string') dnd.startTime = settings.doNotDisturb.startTime;
       if (typeof settings.doNotDisturb.endTime === 'string') dnd.endTime = settings.doNotDisturb.endTime;
@@ -282,7 +442,11 @@ export async function updateNotificationSettings(req, res) {
     }
 
     if (settings.callNotifications && typeof settings.callNotifications === 'object') {
-      const call = user.notificationSettings.callNotifications || {};
+      const call = {
+        ...(user.notificationSettings.callNotifications?.toObject?.() ||
+          user.notificationSettings.callNotifications ||
+          {}),
+      };
       const c = settings.callNotifications;
       if (typeof c.voiceCallEnabled === 'boolean') call.voiceCallEnabled = c.voiceCallEnabled;
       if (typeof c.videoCallEnabled === 'boolean') call.videoCallEnabled = c.videoCallEnabled;
@@ -292,7 +456,11 @@ export async function updateNotificationSettings(req, res) {
     }
 
     if (settings.webNotifications && typeof settings.webNotifications === 'object') {
-      const web = user.notificationSettings.webNotifications || {};
+      const web = {
+        ...(user.notificationSettings.webNotifications?.toObject?.() ||
+          user.notificationSettings.webNotifications ||
+          {}),
+      };
       const w = settings.webNotifications;
       if (typeof w.enabled === 'boolean') web.enabled = w.enabled;
       if (typeof w.soundOnWeb === 'boolean') web.soundOnWeb = w.soundOnWeb;
@@ -300,8 +468,12 @@ export async function updateNotificationSettings(req, res) {
       user.notificationSettings.webNotifications = web;
     }
 
+    user.markModified('notificationSettings');
     await user.save();
-    res.json({ success: true, data: user.notificationSettings });
+    res.json({
+      success: true,
+      data: normalizeNotificationSettings(user.notificationSettings),
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -632,7 +804,7 @@ export async function discoverUsers(req, res) {
     const data = candidates.map((u) => {
       const info = statusByUserId.get(String(u._id));
       return {
-        ...u.toPublicJSON(),
+        ...u.toPublicJSON(req.user._id),
         requestStatus: info?.status || 'none',
         requestId: info?.requestId || null,
       };
@@ -754,7 +926,7 @@ export async function listFriends(req, res) {
       .map((id) => byId.get(String(id)))
       .filter(Boolean)
       .filter((u) => !blockedIds.has(String(u._id)))
-      .map((u) => u.toPublicJSON());
+      .map((u) => u.toPublicJSON(req.user._id));
 
     res.json({ success: true, data });
   } catch (err) {

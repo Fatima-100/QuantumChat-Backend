@@ -7,8 +7,8 @@ import { getStorage } from '../middleware/upload.js';
 import User from '../models/User.js';
 import Group from '../models/Group.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
-import { isUserOnline } from '../socket/index.js';
 import { notifyUser } from '../services/pushService.js';
+import { conversationKey } from '../utils/conversationKey.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
 import { toObjectId } from '../utils/toObjectId.js';
@@ -40,31 +40,27 @@ function allowsReadReceipts(privacy) {
   if (value === false || value === 'nobody') return false;
   return true;
 }
-
-async function assertCanDirectMessage(senderId, recipientId) {
-  const recipientOid = toObjectId(recipientId);
+async function assertCanDirectMessageWithDoc(senderId, recipient) {
   const senderOid = toObjectId(senderId);
-  if (!recipientOid || !senderOid) {
+  const recipientOid = recipient._id;
+  if (!senderOid) {
     const err = new Error('Invalid recipient id');
     err.status = 400;
     throw err;
   }
   if (String(senderOid) === String(recipientOid)) return;
-  const recipient = await User.findById(recipientOid).select('privacy friends');
-  if (!recipient) {
-    const err = new Error('Recipient not found');
-    err.status = 404;
-    throw err;
-  }
   const policy = recipient.privacy?.whoCanMessage || 'everyone';
   if (policy === 'everyone') return;
 
   const recipientFriends = (recipient.friends || []).map(String);
   const senderIsFriend = recipientFriends.includes(String(senderOid));
-  if (policy === 'friends') {
+ if (policy === 'friends') {
     if (!senderIsFriend) {
-      const err = new Error('This user only accepts messages from friends');
+      const err = new Error('This user is not accepting messages from friends');
       err.status = 403;
+      err.code = 'NOT_FRIENDS';
+      err.recipientId = String(recipientOid);
+      err.recipientUsername = recipient.username;
       throw err;
     }
     return;
@@ -74,12 +70,31 @@ async function assertCanDirectMessage(senderId, recipientId) {
     const sender = await User.findById(senderOid).select('friends');
     const senderFriends = new Set((sender?.friends || []).map(String));
     const mutual = recipientFriends.some((id) => senderFriends.has(id));
-    if (!mutual) {
-      const err = new Error('This user only accepts messages from friends of friends');
+  if (!mutual) {
+      const err = new Error('This user is not accepting messages from friends of friends');
       err.status = 403;
+      err.code = 'NOT_FRIENDS';
+      err.recipientId = String(recipientOid);
+      err.recipientUsername = recipient.username;
       throw err;
     }
   }
+}
+
+function mediaKindFromAttachment(attachment) {
+  if (!attachment) return null;
+  const mime = String(attachment.mimetype || '').toLowerCase();
+  const name = String(attachment.filename || '').toLowerCase();
+  if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
+    return 'audio';
+  }
+  if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) return 'image';
+  if (mime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) return 'video';
+  return null;
+}
+
+function viewOnceAllowedForAttachment(attachment) {
+  return Boolean(mediaKindFromAttachment(attachment));
 }
 
 function toClientMessage(doc) {
@@ -116,6 +131,24 @@ function toClientMessage(doc) {
   }
   if (typeof message.content === 'string') {
     message.content = message.content;
+  }
+  if (Array.isArray(message.editHistory)) {
+    message.editHistory = message.editHistory.map((h) => ({
+      forRecipient: h.forRecipient,
+      forSender: h.forSender,
+      content: h.content,
+      envelopes: Array.isArray(h.envelopes)
+        ? h.envelopes.map((e) => ({ ...e, user: e.user?.toString?.() || String(e.user) }))
+        : undefined,
+      editedAt: h.editedAt,
+    }));
+  }
+  if (message.viewOnceOpenedBy) {
+    message.viewOnceOpenedBy = message.viewOnceOpenedBy?.toString?.() || String(message.viewOnceOpenedBy);
+  }
+  // Never leak ciphertext metadata after a view-once open.
+  if (message.viewOnce && message.viewOnceOpenedAt) {
+    message.attachment = null;
   }
   return message;
 }
@@ -251,6 +284,11 @@ async function assertForwardAllowed(req, forwardedFrom) {
     err.status = 403;
     throw err;
   }
+  if (original.viewOnce) {
+    const err = new Error('View once media cannot be forwarded');
+    err.status = 403;
+    throw err;
+  }
   const verdict = evaluateForwardPolicy(original);
   if (!verdict.allowed) {
     const err = new Error(verdict.reason || 'Forwarding not allowed');
@@ -281,6 +319,12 @@ export async function checkForwardAllowed(req, res) {
         data: { allowed: false, reason: 'Not allowed to forward this message' },
       });
     }
+    if (original.viewOnce) {
+      return res.json({
+        success: true,
+        data: { allowed: false, reason: 'View once media cannot be forwarded' },
+      });
+    }
     const verdict = evaluateForwardPolicy(original);
     return res.json({ success: true, data: verdict });
   } catch (err) {
@@ -300,24 +344,31 @@ export async function sendMessage(req, res) {
       kind,
       expiresInSeconds,
       forwardPolicy: forwardPolicyRaw,
+      viewOnce: viewOnceRaw,
     } = req.body;
-    if (!to || !validateEnvelope(forRecipient) || !validateEnvelope(forSender)) {
+   if (!to || !validateEnvelope(forRecipient) || !validateEnvelope(forSender)) {
       return res.status(400).json({
         success: false,
         error: 'to, forRecipient and forSender (each a sealed-box envelope) are all required',
       });
     }
-    if (!mongoose.isValidObjectId(to)) {
+    const toOid = toObjectId(to);
+    if (!toOid) {
       return res.status(400).json({ success: false, error: 'Invalid recipient id' });
     }
     if (attachmentId && !mongoose.isValidObjectId(attachmentId)) {
       return res.status(400).json({ success: false, error: 'Invalid attachment id' });
     }
-    if (await areUsersBlocked(req.user._id, to, req.user.blockedUsers)) {
+    const recipient = await User.findById(toOid).select('privacy friends blockedUsers username');
+    if (!recipient) {
+      return res.status(404).json({ success: false, error: 'Recipient not found' });
+    }
+    const senderBlockedRecipient = (req.user.blockedUsers || []).some((id) => String(id) === String(toOid));
+    const recipientBlockedSender = (recipient.blockedUsers || []).some((id) => String(id) === String(req.user._id));
+    if (senderBlockedRecipient || recipientBlockedSender) {
       return res.status(403).json({ success: false, error: 'Cannot message a blocked user' });
     }
-    await assertCanDirectMessage(req.user._id, to);
-
+    await assertCanDirectMessageWithDoc(req.user._id, recipient);
     const expiresAt = resolveExpiresAt(expiresInSeconds);
     if (expiresAt === null) {
       return res.status(400).json({
@@ -326,13 +377,44 @@ export async function sendMessage(req, res) {
       });
     }
 
-    const replyToId = await assertReplyAllowed(req, replyTo, { to });
+    const replyToId = await assertReplyAllowed(req, replyTo, { to: toOid });
     const forwardMeta = await assertForwardAllowed(req, forwardedFrom);
     const forwardPolicy = parseForwardPolicy(forwardPolicyRaw);
 
+    let viewOnce = viewOnceRaw === true;
+    let viewOnceMediaKind = null;
+    if (viewOnce) {
+      const viewOnceAttachmentOid = toObjectId(attachmentId);
+      if (!viewOnceAttachmentOid) {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      const attachment = await Attachment.findById(viewOnceAttachmentOid);
+      if (!attachment || !viewOnceAllowedForAttachment(attachment)) {
+        return res.status(400).json({
+          success: false,
+          error: 'View once is only available for photo, video, or voice attachments',
+        });
+      }
+      viewOnceMediaKind = mediaKindFromAttachment(attachment);
+      // View-once media must not be forwarded further.
+      if (!forwardPolicy) {
+        // force allowForward false via create fields below
+      }
+    }
+
+    // Vault decoy: if I have this recipient vaulted and my vault is
+    // currently locked on this request, this message belongs to the decoy
+    // thread only — it will never appear once I unlock the real vault view,
+    // and the real (pre-vaulting) history stays completely untouched.
+    const senderVaultedPeers = (req.user.vaultedPeers || []).map((v) => String(v.peer));
+    const isDecoySend = senderVaultedPeers.includes(String(toOid)) && !req.vaultUnlocked;
+
     const created = await Message.create({
       from: req.user._id,
-      to,
+      to: toOid,
       forRecipient: normalizeEnvelope(forRecipient),
       forSender: normalizeEnvelope(forSender),
       attachment: attachmentId || undefined,
@@ -340,7 +422,15 @@ export async function sendMessage(req, res) {
       kind: kind === 'ai_note' ? 'ai_note' : 'text',
       expiresAt: expiresAt || undefined,
       forwardedFrom: forwardMeta,
+      decoyFor: isDecoySend ? req.user._id : undefined,
       ...(forwardPolicy ? { forwardPolicy } : {}),
+      ...(viewOnce
+        ? {
+            viewOnce: true,
+            viewOnceMediaKind,
+            forwardPolicy: { allowForward: false, forwardUntil: null },
+          }
+        : {}),
     });
 
     // Skip a second round-trip when nothing needs populate — text sends are the hot path.
@@ -351,25 +441,36 @@ export async function sendMessage(req, res) {
         .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
     }
     const payload = toClientMessage(message);
-    const isSelfChat = String(to) === String(req.user._id);
+    const isSelfChat = String(toOid) === String(req.user._id);
 
     const io = req.app.get('io');
     if (io) {
-      io.to(to.toString()).emit('message:new', payload);
+      io.to(toOid.toString()).emit('message:new', payload);
       // Self-notes: room is the same — don't emit twice.
       if (!isSelfChat) {
         io.to(req.user._id.toString()).emit('message:new', payload);
       }
     }
 
-    if (!isSelfChat && !isUserOnline(to)) {
-      notifyUser(to, { title: 'QuantumChat', body: 'New message' }).catch(() => {});
+    if (!isSelfChat) {
+      notifyUser(toOid, {
+        title: 'QuantumChat',
+        body: 'New message',
+        kind: 'dm',
+        conversationKey: conversationKey({ from: req.user._id, to: toOid }),
+        url: `/chat/${req.user._id}`,
+      }).catch(() => { });
     }
 
     incrementCiphertextsRelayed();
     res.status(201).json({ success: true, data: payload });
   } catch (err) {
-    res.status(err.status || 500).json({ success: false, error: err.message });
+    res.status(err.status || 500).json({
+      success: false,
+      error: err.message,
+      code: err.code || undefined,
+      recipientId: err.recipientId || undefined,
+    });
   }
 }
 
@@ -443,6 +544,9 @@ export async function getConversation(req, res) {
     const before = req.query.before ? new Date(req.query.before) : null;
     const markRead = req.query.markRead !== '0';
 
+    const myVaultedPeers = (req.user.vaultedPeers || []).map((v) => String(v.peer));
+    const isVaultedConversation = myVaultedPeers.includes(String(peerOid));
+
     const filter = {
       $and: [
         {
@@ -452,6 +556,13 @@ export async function getConversation(req, res) {
           ],
         },
         notExpiredFilter(),
+        // Vault separation only applies to conversations I've vaulted.
+        // Locked: show only my decoy thread for this peer (a genuinely
+        // separate, initially-empty history). Unlocked or not vaulted:
+        // show only real messages, decoys never leak through.
+        isVaultedConversation && !req.vaultUnlocked
+          ? { decoyFor: req.user._id }
+          : { decoyFor: null },
       ],
     };
     if (before && !Number.isNaN(before.getTime())) {
@@ -562,6 +673,38 @@ export async function syncMessages(req, res) {
         : new Date(floor);
 
     const groupIds = await Group.find({ members: req.user._id }).distinct('_id');
+
+    // Vault unlock is a single flag for the whole request, not per-peer — the
+    // JWT doesn't enumerate peers. So: locked -> vaulted peers show decoy-only,
+    // everything else (unvaulted DMs + groups) shows real-only. Unlocked ->
+    // real-only for everyone; decoys never leak into the unlocked view, same
+    // rule as getConversation.
+    const vaultedPeerIds = req.vaultUnlocked
+      ? []
+      : (req.user.vaultedPeers || [])
+        .map((v) => toObjectId(v.peer))
+        .filter(Boolean);
+
+    const involvesVaultedPeer = vaultedPeerIds.length
+      ? [
+        { from: req.user._id, to: { $in: vaultedPeerIds } },
+        { from: { $in: vaultedPeerIds }, to: req.user._id },
+      ]
+      : null;
+
+    const scopeFilter = involvesVaultedPeer
+      ? {
+        $or: [
+          // Locked + vaulted peer: decoy thread only.
+          {
+            $and: [{ decoyFor: req.user._id }, { $or: involvesVaultedPeer }],
+          },
+          // Everything else: real messages only, decoys never leak.
+          { decoyFor: null, $nor: involvesVaultedPeer },
+        ],
+      }
+      : { decoyFor: null };
+
     const filter = {
       $and: [
         {
@@ -573,6 +716,7 @@ export async function syncMessages(req, res) {
         },
         { createdAt: { $gt: since } },
         notExpiredFilter(),
+        scopeFilter,
       ],
     };
 
@@ -631,6 +775,89 @@ export async function markConversationRead(req, res) {
     res.json({ success: true, data: { updated: result.modifiedCount } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function openViewOnce(req, res) {
+  try {
+    const { messageId } = req.params;
+    if (!mongoose.isValidObjectId(messageId)) {
+      return res.status(400).json({ success: false, error: 'Invalid message id' });
+    }
+
+    const existing = await Message.findById(messageId).populate('attachment');
+    if (!existing) return res.status(404).json({ success: false, error: 'Message not found' });
+    if (!existing.viewOnce) {
+      return res.status(400).json({ success: false, error: 'Message is not view-once media' });
+    }
+    if (existing.viewOnceOpenedAt) {
+      const populated = await Message.findById(existing._id)
+        .populate('attachment', ATTACHMENT_POPULATE)
+        .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+      return res.json({ success: true, data: toClientMessage(populated) });
+    }
+
+    const uid = req.user._id.toString();
+    const senderId = existing.from.toString();
+    let isParty = false;
+    let groupMemberIds = null;
+
+    if (existing.group) {
+      const Group = (await import('../models/Group.js')).default;
+      const group = await Group.findById(existing.group);
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      groupMemberIds = group.members.map((m) => m.toString());
+      isParty = groupMemberIds.includes(uid);
+    } else if (existing.to) {
+      isParty = [senderId, existing.to.toString()].includes(uid);
+    }
+    if (!isParty) return res.status(403).json({ success: false, error: 'Not authorized' });
+
+    const attachmentId = existing.attachment?._id || existing.attachment;
+    const viewOnceMediaKind =
+      existing.viewOnceMediaKind ||
+      (existing.attachment ? mediaKindFromAttachment(existing.attachment) : undefined);
+
+    // Atomic claim so only one open wins across devices.
+    const claimed = await Message.findOneAndUpdate(
+      { _id: existing._id, viewOnce: true, viewOnceOpenedAt: null },
+      {
+        $set: {
+          viewOnceOpenedAt: new Date(),
+          viewOnceOpenedBy: req.user._id,
+          ...(viewOnceMediaKind ? { viewOnceMediaKind } : {}),
+        },
+        $unset: { attachment: 1 },
+      },
+      { new: true },
+    );
+
+    if (!claimed) {
+      const populated = await Message.findById(existing._id)
+        .populate('attachment', ATTACHMENT_POPULATE)
+        .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+      return res.json({ success: true, data: toClientMessage(populated) });
+    }
+
+    await removeAttachmentFiles(attachmentId);
+
+    const populated = await Message.findById(claimed._id)
+      .populate('attachment', ATTACHMENT_POPULATE)
+      .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
+    const payload = toClientMessage(populated);
+
+    const io = req.app.get('io');
+    if (existing.group && groupMemberIds) {
+      for (const memberId of groupMemberIds) {
+        io?.to(memberId).emit('message:view-once-opened', payload);
+      }
+    } else {
+      emitToParticipants(io, existing, 'message:view-once-opened', payload);
+    }
+
+    res.json({ success: true, data: payload });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 }
 
@@ -757,6 +984,15 @@ export async function editMessage(req, res) {
       return res.status(403).json({ success: false, error: 'Only the sender can edit this message' });
     }
 
+    const previousVersion = {
+      editedAt: message.editedAt || message.createdAt,
+      ...(message.group
+        ? typeof message.content === 'string'
+          ? { content: message.content }
+          : { envelopes: message.envelopes }
+        : { forRecipient: message.forRecipient, forSender: message.forSender }),
+    };
+
     if (message.group) {
       const Group = (await import('../models/Group.js')).default;
       const group = await Group.findById(message.group);
@@ -794,9 +1030,10 @@ export async function editMessage(req, res) {
       message.forSender = normalizeEnvelope(forSender);
     }
 
-    message.editedAt = new Date();
+      message.editedAt = new Date();
+    message.editHistory = [...(message.editHistory || []), previousVersion];
+    message.markModified('editHistory');
     await message.save();
-
     const populated = await Message.findById(message._id)
       .populate('attachment', ATTACHMENT_POPULATE)
       .populate('replyTo', 'from forRecipient forSender envelopes group content createdAt');
@@ -818,5 +1055,63 @@ export async function editMessage(req, res) {
     res.json({ success: true, data: payload });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+}
+export async function getMessageInfo(req, res) {
+  try {
+    const { messageId } = req.params;
+    const messageOid = toObjectId(messageId);
+    if (!messageOid) {
+      return res.status(400).json({ success: false, error: 'Invalid message id' });
+    }
+    const message = await Message.findById(messageOid);
+    if (!message) return res.status(404).json({ success: false, error: 'Message not found' });
+
+    const uid = req.user._id.toString();
+    if (String(message.from) !== uid) {
+      return res.status(403).json({ success: false, error: 'Only the sender can view message info' });
+    }
+
+    if (message.group) {
+      const group = await Group.findById(message.group).populate('members', 'username avatarPath');
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+
+      const deliveredMap = new Map((message.deliveredTo || []).map((d) => [String(d.user), d.at]));
+      const readMap = new Map((message.readBy || []).map((r) => [String(r.user), r.at]));
+
+      const members = group.members
+        .filter((m) => String(m._id) !== uid)
+        .map((m) => ({
+          userId: String(m._id),
+          username: m.username,
+          hasAvatar: Boolean(m.avatarPath),
+          deliveredAt: deliveredMap.get(String(m._id)) || null,
+          readAt: readMap.get(String(m._id)) || null,
+        }));
+
+      return res.json({
+        success: true,
+        data: {
+          id: message._id.toString(),
+          isGroup: true,
+          totalRecipients: members.length,
+          deliveredCount: members.filter((m) => m.deliveredAt).length,
+          readCount: members.filter((m) => m.readAt).length,
+          members,
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: message._id.toString(),
+        isGroup: false,
+        deliveredAt: message.deliveredAt || null,
+        readAt: message.readAt || null,
+      },
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 }

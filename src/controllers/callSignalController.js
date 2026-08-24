@@ -1,7 +1,8 @@
 import CallSignal from '../models/CallSignal.js';
 import User from '../models/User.js';
-import { isSealedEnvelope } from '../utils/callEnvelope.js';
+import { isSealedEnvelope, canUserInviteToCall } from '../utils/callEnvelope.js';
 import { toObjectId } from '../utils/toObjectId.js';
+import { notifyUser } from '../services/pushService.js';
 
 const ALLOWED_EVENTS = new Set([
   'call:invite',
@@ -31,6 +32,19 @@ function toClientSignal(signal) {
   };
 }
 
+function pushIncomingCall(toUserId, event, callId) {
+  if (event !== 'call:invite' && event !== 'meeting:invite') return;
+  const isMeeting = event === 'meeting:invite';
+  notifyUser(toUserId, {
+    title: 'QuantumChat',
+    body: isMeeting ? 'Incoming meeting' : 'Incoming call',
+    kind: 'call',
+    tag: `${isMeeting ? 'meeting' : 'call'}:${callId}`,
+    url: '/chat',
+    requireInteraction: true,
+  }).catch(() => {});
+}
+
 /**
  * Stores only an opaque X5 envelope. This is a fallback transport for
  * serverless deployments where Socket.IO cannot keep a connection alive.
@@ -57,6 +71,14 @@ export async function createCallSignal(req, res) {
       return res.status(404).json({ success: false, error: 'Call recipient not found' });
     }
 
+    if (event === 'call:invite' || event === 'meeting:invite') {
+      const allowed = await canUserInviteToCall(req.user._id, recipientId);
+      if (!allowed) {
+        return res.status(403).json({ success: false, error: 'Call invitation blocked by user privacy settings' });
+      }
+    }
+
+
     const signal = await CallSignal.create({
       from: req.user._id,
       to: recipientId,
@@ -69,6 +91,8 @@ export async function createCallSignal(req, res) {
         targetPublicKey: String(envelope.targetPublicKey).toLowerCase(),
       },
     });
+
+    pushIncomingCall(recipientId, event, callId.trim());
 
     return res.status(201).json({
       success: true,

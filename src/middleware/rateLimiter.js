@@ -45,6 +45,21 @@ export const syncLimiter = rateLimit({
 });
 
 /**
+ * IP-keyed gate in front of requireAuth so CodeQL sees rate limiting on the
+ * auth/DB lookup. The ceiling is high on purpose: two callers behind one NAT
+ * must not share a tight IP budget (that 429'd ICE and stuck calls). The
+ * real per-user cap is callSignalLimiter, applied after requireAuth.
+ */
+export const callSignalGatewayLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 2000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  message: { success: false, error: "Too many call signaling requests" },
+});
+
+/**
  * Separate budget for short-lived encrypted call signaling polling.
  *
  * Keyed by user, not IP — same reasoning as syncLimiter. Two people calling
@@ -80,4 +95,28 @@ export const contactLookupLimiter = rateLimit({
     success: false,
     error: "Too many contact lookups, please try again shortly",
   },
+});
+/** Strict budget for vault password attempts — brute-force risk, same reasoning as authLimiter. */
+export const vaultAuthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => String(req.user?._id || req.ip),
+  message: {
+    success: false,
+    error: "Too many vault password attempts, please try again shortly",
+  },
+});
+
+/** Public budget for device-link endpoints (verify/status/claim) keyed by IP. */
+export const deviceLinkPublicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => String(req.ip),
+  message: { success: false, error: "Too many device-link requests, please try again shortly" },
 });

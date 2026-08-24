@@ -38,7 +38,14 @@ export async function listSessions(req, res) {
       user: req.user._id,
       revokedAt: null,
     }).sort({ lastSeenAt: -1 });
-    res.json({ success: true, data: sessions.map((s) => s.toJSON()) });
+    const currentSessionId = req.sessionId || null;
+    res.json({
+      success: true,
+      data: sessions.map((s) => ({
+        ...s.toJSON(),
+        isCurrent: Boolean(currentSessionId && s.sessionId === currentSessionId),
+      })),
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -62,6 +69,14 @@ export async function revokeSession(req, res) {
 
     session.revokedAt = new Date();
     await session.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(String(req.user._id)).emit('device:revoked', {
+        sessionId: session.sessionId,
+        revokedAt: session.revokedAt.toISOString(),
+      });
+    }
 
     res.json({
       success: true,

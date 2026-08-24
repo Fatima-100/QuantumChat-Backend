@@ -40,6 +40,16 @@ const storySchema = new mongoose.Schema(
     envelopeNonce: { type: String, default: undefined },
     envelopeEphemeralPublicKey: { type: String, default: undefined },
     envelopeTargetHint: { type: String, default: undefined },
+    // --- Story viewers  ---
+    views: {
+      type: [
+        {
+          user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+          viewedAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
@@ -76,6 +86,9 @@ storySchema.methods.toPublicJSON = function toPublicJSON() {
     envelopeEphemeralPublicKey: this.envelopeEphemeralPublicKey || undefined,
     envelopeTargetHint: this.envelopeTargetHint || undefined,
   };
+};
+storySchema.methods.viewerCount = function viewerCount() {
+  return Array.isArray(this.views) ? this.views.length : 0;
 };
 
 export default mongoose.model('Story', storySchema, 'stories');

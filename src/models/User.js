@@ -1,7 +1,8 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-
+import { normalizeNotificationSettings } from '../utils/notificationSettings.js';
 const HEX_64 = /^[0-9a-f]{64}$/i;
 export const KEY_SET_SIZE = 5;
 
@@ -22,6 +23,8 @@ const privacySchema = new mongoose.Schema(
     onlineStatusVisibleTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     /** Boolean (legacy) or `everyone` | `friends` | `nobody`. */
     readReceipts: { type: mongoose.Schema.Types.Mixed, default: 'everyone' },
+    /** When false, this user does not broadcast typing indicators to peers. */
+    typingIndicator: { type: Boolean, default: true },
     whoCanMessage: {
       type: String,
       enum: ['everyone', 'friends', 'friendsOfFriends'],
@@ -38,6 +41,46 @@ const privacySchema = new mongoose.Schema(
       default: 'everyone',
     },
     storyViewers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    profileVisibility: {
+      type: String,
+      enum: ['everyone', 'friends', 'onlyMe'],
+      default: 'everyone',
+    },
+    birthdayVisibility: {
+      type: String,
+      enum: ['everyone', 'friends', 'onlyMe'],
+      default: 'everyone',
+    },
+    whoCanMention: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    whoCanAddToGroups: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    whoCanInviteViaGroupLink: {
+      type: String,
+      enum: ['everyone', 'friends', 'nobody'],
+      default: 'everyone',
+    },
+    whoCanCreateGroupsWithMe: {
+      type: String,
+      enum: ['everyone', 'friends'],
+      default: 'everyone',
+    },
+    groupMentions: {
+      type: String,
+      enum: ['everyone', 'adminsOnly', 'nobody'],
+      default: 'everyone',
+    },
+    /**
+     * When true, this device blocks screenshots / screen recording on chats
+     * and profiles where the platform supports it (strongest on mobile).
+     */
+    screenshotProtection: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -65,6 +108,8 @@ const notificationSettingsSchema = new mongoose.Schema(
       enum: ['on', 'off', 'custom'],
       default: 'on',
     },
+     /** Whether this user wants a reminder 5 minutes before a friend's birthday begins. */
+    birthdayReminders: { type: Boolean, default: true },
     doNotDisturb: {
       enabled: { type: Boolean, default: false },
       startTime: { type: String, default: '22:00' },
@@ -135,6 +180,23 @@ const userSchema = new mongoose.Schema(
       maxlength: 32,
       default: '',
     },
+     dateOfBirth: {
+      type: Date,
+      default: null,
+    },
+    /** IANA timezone name, auto-captured client-side (e.g. 'Asia/Karachi'). Used to schedule birthday notifications in the user's local time. */
+    timezone: {
+      type: String,
+      trim: true,
+      maxlength: 64,
+      default: 'UTC',
+    },
+    /** Internal — prevents the birthday job from notifying friends twice in the same year. Never exposed via JSON. */
+    lastBirthdayNotifiedYear: {
+      type: Number,
+      default: null,
+      select: false,
+    },
     email: {
       type: String,
       required: true,
@@ -175,6 +237,14 @@ const userSchema = new mongoose.Schema(
     passwordResetExpires: { type: Date, select: false },
     totpSecret: { type: String, select: false },
     totpEnabled: { type: Boolean, default: false },
+    vaultPasswordHash: { type: String, select: false, default: null },
+    vaultEnabled: { type: Boolean, default: false },
+    vaultedPeers: [
+      {
+        peer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        addedAt: { type: Date, default: Date.now },
+      },
+    ],
     publicKeys: {
       type: [String],
       required: true,
@@ -189,6 +259,26 @@ const userSchema = new mongoose.Schema(
     },
     lastLoginAt: {
       type: Date,
+    },
+    /** Last REST/socket presence heartbeat — used when Socket.IO is unavailable (e.g. Vercel). */
+    presenceAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    typingTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    typingGroupId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Group',
+      default: null,
+    },
+    typingAt: {
+      type: Date,
+      default: null,
     },
     privacy: {
       type: privacySchema,
@@ -231,7 +321,6 @@ friends: [
   },
   { timestamps: true }
 );
-
 userSchema.pre('save', async function hashPassword(next) {
   if (!this.isModified('password')) return next();
   if (!this.password) return next();
@@ -243,6 +332,17 @@ userSchema.methods.comparePassword = function comparePassword(candidate) {
   return bcrypt.compare(candidate, this.password);
 };
 
+userSchema.methods.compareVaultPassword = function compareVaultPassword(candidate) {
+  if (!this.vaultPasswordHash) return Promise.resolve(false);
+  return bcrypt.compare(candidate, this.vaultPasswordHash);
+};
+userSchema.methods.createVaultUnlockToken = function createVaultUnlockToken() {
+  return jwt.sign(
+    { sub: String(this._id), scope: 'vault' },
+    process.env.JWT_SECRET,
+    { algorithm: 'HS256', expiresIn: '15m' }
+  );
+};
 userSchema.methods.createEmailVerifyToken = function createEmailVerifyToken() {
   const token = crypto.randomBytes(32).toString('hex');
   this.emailVerifyToken = crypto.createHash('sha256').update(token).digest('hex');
@@ -257,14 +357,55 @@ userSchema.methods.createPasswordResetToken = function createPasswordResetToken(
   return token;
 };
 
-userSchema.methods.toPublicJSON = function toPublicJSON() {
+userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
   let publicKeys = Array.isArray(this.publicKeys) ? this.publicKeys.filter(Boolean) : [];
   if (publicKeys.length === 0 && this.publicKey) {
     publicKeys = [this.publicKey];
   }
 
   const privacy = this.privacy || {};
-  const showLastSeen = privacy.lastSeen !== 'nobody';
+  const lastSeenSetting = privacy.lastSeen || 'everyone';
+  let showLastSeen = false;
+  if (lastSeenSetting === 'everyone') {
+    showLastSeen = true;
+  } else if (lastSeenSetting === 'friends' && viewerId) {
+    if (String(viewerId) === String(this._id)) {
+      showLastSeen = true;
+    } else {
+      const friendIds = (this.friends || []).map((f) => String(f._id || f));
+      showLastSeen = friendIds.includes(String(viewerId));
+    }
+  }
+
+  const profileVisibilitySetting = privacy.profileVisibility || 'everyone';
+  let showProfileDetails = false;
+  if (profileVisibilitySetting === 'everyone') {
+    showProfileDetails = true;
+  } else if (profileVisibilitySetting === 'friends' && viewerId) {
+    if (String(viewerId) === String(this._id)) {
+      showProfileDetails = true;
+    } else {
+      const friendIds = (this.friends || []).map((f) => String(f._id || f));
+      showProfileDetails = friendIds.includes(String(viewerId));
+    }
+  } else if (profileVisibilitySetting === 'onlyMe' && viewerId) {
+    showProfileDetails = String(viewerId) === String(this._id);
+  }
+
+  const birthdayVisibilitySetting = privacy.birthdayVisibility || 'everyone';
+  let showBirthday = false;
+  if (birthdayVisibilitySetting === 'everyone') {
+    showBirthday = true;
+  } else if (birthdayVisibilitySetting === 'friends' && viewerId) {
+    if (String(viewerId) === String(this._id)) {
+      showBirthday = true;
+    } else {
+      const friendIds = (this.friends || []).map((f) => String(f._id || f));
+      showBirthday = friendIds.includes(String(viewerId));
+    }
+  } else if (birthdayVisibilitySetting === 'onlyMe' && viewerId) {
+    showBirthday = String(viewerId) === String(this._id);
+  }
 
   let readReceipts = privacy.readReceipts;
   if (typeof readReceipts === 'boolean') {
@@ -282,7 +423,9 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
     id: this._id,
     username: this.username,
     displayName: this.displayName || '',
-    bio: this.bio || '',
+    bio: showProfileDetails ? (this.bio || '') : '',
+    phone: showProfileDetails ? (this.phone || '') : '',
+    birthday: (showBirthday && this.birthday) ? this.birthday : null,
     publicKeys: publicKeys.map((k) => String(k).toLowerCase()),
     keyRotatedAt: this.keyRotatedAt,
     lastLoginAt: showLastSeen ? this.lastLoginAt : null,
@@ -295,12 +438,21 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
         ? privacy.onlineStatusVisibleTo.map((id) => String(id._id || id))
         : [],
       readReceipts,
+      typingIndicator: privacy.typingIndicator !== false,
       whoCanMessage: privacy.whoCanMessage || 'everyone',
       discoverable: privacy.discoverable || 'everyone',
       story: privacy.story || 'everyone',
       storyViewers: Array.isArray(privacy.storyViewers)
         ? privacy.storyViewers.map((id) => String(id._id || id))
         : [],
+      profileVisibility: privacy.profileVisibility || 'everyone',
+      birthdayVisibility: privacy.birthdayVisibility || 'everyone',
+      whoCanMention: privacy.whoCanMention || 'everyone',
+      whoCanAddToGroups: privacy.whoCanAddToGroups || 'everyone',
+      whoCanInviteViaGroupLink: privacy.whoCanInviteViaGroupLink || 'everyone',
+      whoCanCreateGroupsWithMe: privacy.whoCanCreateGroupsWithMe || 'everyone',
+      groupMentions: privacy.groupMentions || 'everyone',
+      screenshotProtection: privacy.screenshotProtection === true,
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
@@ -310,14 +462,16 @@ userSchema.methods.toPublicJSON = function toPublicJSON() {
 
 userSchema.methods.toSelfJSON = function toSelfJSON() {
   return {
-    ...this.toPublicJSON(),
+    ...this.toPublicJSON(this._id),
     email: this.email,
     phone: this.phone || '',
+    dateOfBirth: this.dateOfBirth,
+    timezone: this.timezone || 'UTC',
     emailVerified: Boolean(this.emailVerified),
     lastLoginAt: this.lastLoginAt,
     blockedUsers: Array.isArray(this.blockedUsers) ? this.blockedUsers.map((id) => String(id)) : [],
-    friends: Array.isArray(this.friends) ? this.friends.map((id) => String(id)) : [],   // ← add this line
-    notificationSettings: this.notificationSettings || {},
+    friends: Array.isArray(this.friends) ? this.friends.map((id) => String(id)) : [],
+    notificationSettings: normalizeNotificationSettings(this.notificationSettings),
     mutedChats: Array.isArray(this.mutedChats) ? this.mutedChats.map((m) => ({
       conversationKey: m.conversationKey,
       expiresAt: m.expiresAt,

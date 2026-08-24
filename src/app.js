@@ -1,19 +1,22 @@
 import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
-import { authLimiter } from './middleware/rateLimiter.js';
+import { allowedOrigins } from './config/corsOrigins.js';
+import { runBirthdayNotifications } from './jobs/birthdayNotifications.js';
 import { publicApiIpLimiter } from './middleware/apiKeyAuth.js';
+import { authLimiter } from './middleware/rateLimiter.js';
 import attachmentRoutes from './routes/attachmentRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import callSignalRoutes from './routes/callSignalRoutes.js';
 import chatThemeRoutes from './routes/chatThemeRoutes.js';
+import deviceLinkRoutes from './routes/deviceLinkRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
 import messageRoutes from './routes/messageRoutes.js';
+import presenceRoutes from './routes/presenceRoutes.js';
 import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
-import { allowedOrigins } from './config/corsOrigins.js';
 
 export function createApp() {
   const app = express();
@@ -55,7 +58,7 @@ export function createApp() {
         return callback(null, false);
       },
       methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-API-Key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id', 'X-API-Key', 'x-vault-token'],
       optionsSuccessStatus: 204,
     })
   );
@@ -64,11 +67,32 @@ export function createApp() {
 
   app.get('/api/health', (req, res) => res.json({ success: true, data: { status: 'ok' } }));
 
+  // Serverless-safe trigger for the birthday-notification sweep. server.js's
+    // setInterval only runs on a persistent process (local dev / non-serverless
+    // hosting); Vercel's api/index.js boots per-request and never keeps that
+    // interval alive, so an external scheduler must call this route on a
+    // schedule instead. Guarded by a shared secret since the caller is an
+    // external scheduler, not a logged-in user.
+    app.get('/api/cron/birthday', async (req, res) => {
+      const provided = req.headers['x-cron-secret'] || req.query.secret;
+      if (!process.env.CRON_SECRET || provided !== process.env.CRON_SECRET) {
+        return res.status(401).json({ success: false, error: 'Unauthorized' });
+      }
+      try {
+        const notifiedCount = await runBirthdayNotifications();
+        res.json({ success: true, data: { notifiedCount } });
+      } catch (err) {
+        console.error('Birthday cron sweep failed:', err.message);
+        res.status(500).json({ success: false, error: 'Sweep failed' });
+      }
+    });
+
   // Skip rate limiting on CORS preflight — OPTIONS must always be cheap/fast.
   app.use('/api/auth', (req, res, next) => {
     if (req.method === 'OPTIONS') return next();
     return authLimiter(req, res, next);
   }, authRoutes);
+  app.use('/api/users/sessions/link', deviceLinkRoutes);
   app.use('/api/users', userRoutes);
   app.use('/api/messages', messageRoutes);
   app.use('/api/attachments', attachmentRoutes);
@@ -76,6 +100,7 @@ export function createApp() {
   app.use('/api/stories', storyRoutes);
   app.use('/api/trust', trustRoutes);
   app.use('/api/call-signals', callSignalRoutes);
+  app.use('/api/presence', presenceRoutes);
   app.use('/api/chat-themes', chatThemeRoutes);
   // Server-to-server integration surface for other QuantumLogics sites,
   // authenticated with an X-API-Key header instead of a user JWT.
