@@ -10,12 +10,12 @@ const attachmentSchema = new mongoose.Schema(
     filename: { type: String, required: true },
     mimetype: { type: String, required: true },
     size: { type: Number, required: true },
-    // Ciphertext blob key (local relative path or Google Drive file id).
+    // Ciphertext blob key (local relative path or Cloudinary public id).
     storagePath: { type: String, required: true },
     storageProvider: {
       type: String,
-      enum: ['local', 'google-drive', 'memory'],
-      default: 'google-drive',
+      enum: ['local', 'cloudinary', 'memory'],
+      default: 'cloudinary',
     },
     // DM sealed-box fields (optional for group secretbox attachments)
     nonce: { type: String },

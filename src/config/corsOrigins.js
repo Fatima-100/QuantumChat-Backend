@@ -1,6 +1,5 @@
 // Known Quantum product frontends, merged with CLIENT_URL / CORS_ORIGINS.
-// Shared by app.js (browser CORS gate) and attachmentController.js, which
-// tells Google which Origin to bind a Drive resumable-upload session to.
+// Used by app.js as the browser CORS gate.
 export const allowedOrigins = [
   ...new Set([
     'http://localhost:5173',

@@ -36,14 +36,14 @@ function rasterImageFilter(label) {
   };
 }
 
-// Memory staging only — durable blobs go to Google Drive via getStorage().
+// Memory staging only — durable blobs go to Cloudinary via getStorage().
 const memory = multer.memoryStorage();
 
 export const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
 
-// Only used for the local/dev "proxy" upload path (see attachmentController.js
-// init/finalize) — Google Drive uploads go straight from the browser via a
-// resumable session URL and never pass through this server.
+// Used for the attachment "proxy" upload path (see attachmentController.js
+// init/finalize) — bytes are staged in memory here, then handed to
+// getStorage().put() to land in Cloudinary.
 export const upload = multer({
   storage: memory,
   limits: { fileSize: MAX_ATTACHMENT_SIZE },
@@ -90,7 +90,7 @@ export const storyUpload = multer({
   },
 });
 
-/** Display / Drive object name helper (not a filesystem path). */
+/** Display / storage object name helper (not a filesystem path). */
 export function newObjectName(prefix = '', ext = '') {
   const safePrefix = String(prefix || '')
     .replace(/[^a-zA-Z0-9_-]/g, '')

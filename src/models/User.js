@@ -311,7 +311,7 @@ friends: [
     },
     avatarStorageProvider: {
       type: String,
-      enum: ['local', 'google-drive'],
+      enum: ['local', 'cloudinary'],
       default: null,
     },
     avatarMimeType: {
