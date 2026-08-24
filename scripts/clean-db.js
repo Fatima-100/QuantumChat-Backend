@@ -1,8 +1,8 @@
 // Deletes all documents from the QuantumChat collections (users, messages,
 // attachments) — for clearing out test data. Does NOT drop the database or
 // collections themselves, so indexes stay intact.
-// Blob files live in Google Drive (not a local uploads/ folder); this script
-// only clears MongoDB. Remove Drive objects from the Shared Drive folder if needed.
+// Blob files live in Cloudinary (not a local uploads/ folder); this script
+// only clears MongoDB. Remove the corresponding objects from Cloudinary if needed.
 //
 // Usage:
 //   node scripts/clean-db.js           # dry run — shows counts, deletes nothing
@@ -42,7 +42,7 @@ async function main() {
   console.log(`  users:       deleted ${results[0].deletedCount}`);
   console.log(`  messages:    deleted ${results[1].deletedCount}`);
   console.log(`  attachments: deleted ${results[2].deletedCount}`);
-  console.log('  (Google Drive blobs are not deleted by this script)');
+  console.log('  (Cloudinary blobs are not deleted by this script)');
 
   console.log('\nDone. Collections still exist (with their indexes) — just empty.');
 

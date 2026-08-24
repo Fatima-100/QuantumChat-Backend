@@ -15,8 +15,8 @@ router.use(apiLimiter);
 router.use(requireAuth);
 
 // Three-step upload: init (validate + get an upload target) -> put bytes
-// (direct to Google Drive from the browser, or proxied through us for
-// local/dev storage) -> finalize (create the Attachment record).
+// (proxied through us to Cloudinary, or local/dev storage) -> finalize
+// (create the Attachment record).
 router.post('/init', initAttachmentUpload);
 router.put('/pending/:id/bytes', upload.single('file'), uploadPendingAttachmentBytes);
 router.post('/finalize', finalizeAttachmentUpload);

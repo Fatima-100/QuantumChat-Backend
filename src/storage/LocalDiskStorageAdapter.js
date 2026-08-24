@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(__dirname, '../../uploads');
 
 /**
- * Local disk storage for development when Google Drive credentials are not set.
+ * Local disk storage for development when Cloudinary credentials are not set.
  * Keys are relative paths under the uploads root (e.g. avatars/<uuid>.jpg).
  */
 export class LocalDiskStorageAdapter {

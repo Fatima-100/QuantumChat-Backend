@@ -135,7 +135,7 @@ export async function setChatTheme(req, res) {
     try {
       await getStorage().delete(previous.wallpaperPath);
     } catch {
-      // best-effort — an orphaned Drive object isn't worth failing the request over
+      // best-effort — an orphaned storage object isn't worth failing the request over
     }
   }
 

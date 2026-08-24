@@ -5,9 +5,9 @@ const HEX_64 = /^[0-9a-f]{64}$/i;
 /**
  * Short-lived bridge between POST /attachments/init and /attachments/finalize.
  * Holds everything needed to create the real Attachment once the ciphertext
- * bytes land in storage (either uploaded directly to Drive by the browser,
- * or proxied through us for local/dev storage). Auto-expires via TTL index
- * so abandoned uploads don't linger.
+ * bytes land in storage (proxied through us to Cloudinary, local disk, or
+ * in-memory test storage). Auto-expires via TTL index so abandoned uploads
+ * don't linger.
  */
 const pendingAttachmentUploadSchema = new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
