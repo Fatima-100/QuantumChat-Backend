@@ -2,12 +2,11 @@ import mongoose from 'mongoose';
 import Attachment from '../models/Attachment.js';
 import Group from '../models/Group.js';
 import PendingAttachmentUpload from '../models/PendingAttachmentUpload.js';
-import { allowedOrigins } from '../config/corsOrigins.js';
 import { getStorage, getStorageProviderName, newObjectName, MAX_ATTACHMENT_SIZE } from '../middleware/upload.js';
 import { areUsersBlocked } from './userController.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
-/** Drive file ids are opaque alnum/-/_ strings; this just rejects garbage input. */
+/** Storage keys are opaque alnum/-/_ strings; this just rejects garbage input. */
 const PLAUSIBLE_STORAGE_KEY = /^[\w-]{5,200}$/;
 
 async function deleteKey(key) {
@@ -21,17 +20,11 @@ async function deleteKey(key) {
 
 /**
  * Validates recipient/group + crypto metadata and hands back an upload
- * target for the ciphertext bytes: either a Google Drive resumable session
- * URL the browser PUTs directly to (bypassing our server and its request
- * size limits), or, for local/dev storage, a small proxy endpoint on us.
+ * target for the ciphertext bytes: a proxy endpoint on us that forwards
+ * the bytes to Cloudinary.
  */
 export async function initAttachmentUpload(req, res) {
   try {
-    // Google only enables CORS on a Drive resumable session for the Origin
-    // present when the session is created — forward the browser's so its
-    // follow-up direct PUT isn't blocked. Validate against our own allowlist
-    // since this value gets echoed back to Google as a trusted origin.
-    const origin = allowedOrigins.includes(req.headers.origin) ? req.headers.origin : undefined;
     const {
       recipientId,
       groupId,
@@ -125,8 +118,7 @@ export async function initAttachmentUpload(req, res) {
       recipientObjectName,
       pending.mimetype,
       numericSize,
-      req.user._id,
-      origin
+      req.user._id
     );
     pending.storageMode = recipientTarget.mode;
     pending.recipientObjectName = recipientObjectName;
@@ -141,8 +133,7 @@ export async function initAttachmentUpload(req, res) {
         senderObjectName,
         pending.mimetype,
         numericSize,
-        req.user._id,
-        origin
+        req.user._id
       );
       pending.senderObjectName = senderObjectName;
       data.sender = { mode: senderTarget.mode, uploadUrl: senderTarget.uploadUrl };
@@ -158,10 +149,9 @@ export async function initAttachmentUpload(req, res) {
 }
 
 /**
- * Local/dev-only fallback for storage providers that can't accept a direct
- * browser upload (local disk, in-memory test storage). Google Drive uploads
- * never hit this route — the browser PUTs straight to the resumable session
- * URL from initAttachmentUpload instead.
+ * Receives the ciphertext bytes staged by initAttachmentUpload and forwards
+ * them to the configured storage provider (Cloudinary in production; local
+ * disk or in-memory storage in dev/test).
  */
 export async function uploadPendingAttachmentBytes(req, res) {
   try {
@@ -197,7 +187,7 @@ export async function uploadPendingAttachmentBytes(req, res) {
 }
 
 export async function finalizeAttachmentUpload(req, res) {
-  const { pendingUploadId, recipientDriveFileId, senderDriveFileId } = req.body;
+  const { pendingUploadId, recipientDirectUploadId, senderDirectUploadId } = req.body;
   let pending;
   try {
     if (!pendingUploadId || !mongoose.isValidObjectId(pendingUploadId)) {
@@ -208,12 +198,12 @@ export async function finalizeAttachmentUpload(req, res) {
       return res.status(404).json({ success: false, error: 'Pending upload not found or expired' });
     }
 
-    const resolveStoragePath = (mode, driveFileId, proxyPath, label) => {
+    const resolveStoragePath = (mode, directUploadId, proxyPath, label) => {
       if (mode === 'direct') {
-        if (!driveFileId || !PLAUSIBLE_STORAGE_KEY.test(driveFileId)) {
-          throw Object.assign(new Error(`A valid ${label} file id is required`), { status: 400 });
+        if (!directUploadId || !PLAUSIBLE_STORAGE_KEY.test(directUploadId)) {
+          throw Object.assign(new Error(`A valid ${label} upload id is required`), { status: 400 });
         }
-        return driveFileId;
+        return directUploadId;
       }
       if (!proxyPath) {
         throw Object.assign(new Error(`${label} bytes were not uploaded`), { status: 400 });
@@ -223,15 +213,15 @@ export async function finalizeAttachmentUpload(req, res) {
 
     const recipientStoragePath = resolveStoragePath(
       pending.storageMode,
-      recipientDriveFileId,
+      recipientDirectUploadId,
       pending.recipientStoragePath,
       'recipient'
     );
     const senderStoragePath = pending.senderObjectName
-      ? resolveStoragePath(pending.storageMode, senderDriveFileId, pending.senderStoragePath, 'sender')
+      ? resolveStoragePath(pending.storageMode, senderDirectUploadId, pending.senderStoragePath, 'sender')
       : undefined;
 
-    const storageProvider = pending.storageMode === 'direct' ? 'google-drive' : getStorageProviderName();
+    const storageProvider = getStorageProviderName();
 
     if (pending.group) {
       const group = await Group.findById(pending.group);
@@ -303,10 +293,11 @@ export async function finalizeAttachmentUpload(req, res) {
       },
     });
   } catch (err) {
-    // Direct-mode bytes already landed in Drive under the browser's control;
-    // best-effort clean them up since no Attachment record will reference them.
+    // Direct-mode bytes already landed with the storage provider under the
+    // browser's control; best-effort clean them up since no Attachment
+    // record will reference them.
     if (pending?.storageMode === 'direct') {
-      await Promise.all([deleteKey(recipientDriveFileId), deleteKey(senderDriveFileId)]);
+      await Promise.all([deleteKey(recipientDirectUploadId), deleteKey(senderDirectUploadId)]);
     }
     const status = err.status || 500;
     res.status(status).json({ success: false, error: err.message });

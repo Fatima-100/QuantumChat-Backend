@@ -18,7 +18,7 @@ import Message from '../src/models/Message.js';
 
 const confirmed = process.argv.includes('--yes');
 
-/** Local disk keys used before Google Drive (relative paths / file extensions). */
+/** Local disk keys used before Cloudinary (relative paths / file extensions). */
 export function looksLikeLocalBlobKey(key) {
   if (!key || typeof key !== 'string') return false;
   if (key.includes('/') || key.includes('\\')) return true;
@@ -118,7 +118,7 @@ async function main() {
   }
   console.log(`  deleted stories: ${localStories.length}`);
 
-  console.log('\nDone. New uploads will use Google Drive file ids.');
+  console.log('\nDone. New uploads will use Cloudinary public ids.');
   await mongoose.disconnect();
   process.exit(0);
 }

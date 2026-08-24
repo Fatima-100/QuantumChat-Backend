@@ -1,5 +1,5 @@
 /**
- * @typedef {{ key: string, provider: 'local' | 'google-drive' | 'memory' }} StoredObject
+ * @typedef {{ key: string, provider: 'local' | 'cloudinary' | 'memory' }} StoredObject
  *
  * @typedef {object} StorageAdapter
  * @property {() => Promise<void>} ensureReady
