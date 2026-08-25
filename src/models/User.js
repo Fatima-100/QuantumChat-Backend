@@ -333,6 +333,13 @@ friends: [
   },
 ],
     
+    preferredLanguage: {
+      type: String,
+      trim: true,
+      minlength: 2,
+      maxlength: 10,
+      default: 'en',
+    },
     avatarPath: {
       type: String,
       default: null,
@@ -486,6 +493,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
     verified: Boolean(this.verified),
+    preferredLanguage: this.preferredLanguage || 'en',
   };
 };
 
@@ -494,6 +502,7 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     ...this.toPublicJSON(this._id),
     email: this.email,
     phone: this.phone || '',
+    preferredLanguage: this.preferredLanguage || 'en',
     dateOfBirth: this.dateOfBirth,
     timezone: this.timezone || 'UTC',
     emailVerified: Boolean(this.emailVerified),

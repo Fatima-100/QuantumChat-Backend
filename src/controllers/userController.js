@@ -12,7 +12,7 @@ import { toObjectId } from '../utils/toObjectId.js';
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
 const PUBLIC_FIELDS =
-  'username displayName statusText bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy emailVerified isSystemUser systemRole verified';
+  'username displayName statusText bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy preferredLanguage emailVerified isSystemUser systemRole verified';
 
 
 export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
@@ -203,8 +203,16 @@ export async function updatePrivacy(req, res) {
 
 export async function updateProfile(req, res) {
   try {
-    const { displayName, statusText, bio, phone, username, privacy, dateOfBirth, timezone } = req.body || {};
+    const { displayName, statusText, bio, phone, username, privacy, dateOfBirth, timezone, preferredLanguage } = req.body || {};
     const user = req.user;
+
+    if (preferredLanguage != null) {
+      const lang = String(preferredLanguage).trim().toLowerCase();
+      if (!/^[a-z]{2,3}(-[a-z0-9]+)?$/i.test(lang) || lang.length > 10) {
+        return res.status(400).json({ success: false, error: 'Invalid preferred language format' });
+      }
+      user.preferredLanguage = lang;
+    }
 
     if (username != null) {
       const next = String(username).trim();
@@ -1209,6 +1217,21 @@ export async function removeFriend(req, res) {
     io?.to(String(friendId)).emit('friend:removed', { by: String(req.user._id) });
     const me = await User.findById(req.user._id);
     res.json({ success: true, data: { id: friendId, removed: true, me: me.toSelfJSON() } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+export async function updateLanguage(req, res) {
+  try {
+    const { language } = req.body || {};
+    const lang = String(language || '').trim().toLowerCase();
+    if (!lang || !/^[a-z]{2,3}(-[a-z0-9]+)?$/i.test(lang) || lang.length > 10) {
+      return res.status(400).json({ success: false, error: 'Invalid language format' });
+    }
+    req.user.preferredLanguage = lang;
+    await req.user.save();
+    res.json({ success: true, data: req.user.toSelfJSON() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
