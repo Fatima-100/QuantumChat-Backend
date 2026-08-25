@@ -36,7 +36,7 @@ async function issueSession(user, req, { deviceLabel, rememberMe = true } = {}) 
 
 export async function register(req, res) {
   try {
-    const { username, email, password, publicKeys, displayName, dateOfBirth, timezone } = req.body;
+    const { username, email, password, publicKeys, displayName, dateOfBirth, timezone, preferredLanguage } = req.body;
     const normalizedUsername = String(username || '').trim();
     const normalizedEmail = String(email || '').trim().toLowerCase();
 
@@ -76,6 +76,14 @@ export async function register(req, res) {
       }
     }
 
+    let resolvedLang = 'en';
+    if (preferredLanguage) {
+      const cleanLang = String(preferredLanguage).trim().toLowerCase();
+      if (/^[a-z]{2,3}(-[a-z0-9]+)?$/i.test(cleanLang) && cleanLang.length <= 10) {
+        resolvedLang = cleanLang;
+      }
+    }
+
     const existing = await User.findOne({
       $or: [{ email: normalizedEmail }, { username: { $regex: new RegExp(`^${normalizedUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }],
     });
@@ -90,6 +98,7 @@ export async function register(req, res) {
       displayName: typeof displayName === 'string' ? displayName.trim().slice(0, 60) : '',
       dateOfBirth: parsedDob,
       timezone: resolvedTimezone,
+      preferredLanguage: resolvedLang,
       publicKeys: publicKeys.map((k) => k.toLowerCase()),
       lastLoginAt: new Date(),
       emailVerified: false,

@@ -256,8 +256,10 @@ export async function notifyUser(userId, payload) {
   }
 
   // E2E: never put message plaintext or ciphertext into push payloads.
-  const title = String(payload?.title || 'QuantumChat').slice(0, 64);
-  const bodyText = String(payload?.body || 'New notification').slice(0, 120);
+  const rawTitle = String(payload?.title || 'QuantumChat');
+  const rawBody = String(payload?.body || 'New notification');
+  const title = Array.from(rawTitle).slice(0, 64).join('');
+  const bodyText = Array.from(rawBody).slice(0, 120).join('');
   if (/SECRET_E2E_|ciphertext|forRecipient|v=0/i.test(`${title}\n${bodyText}`)) {
     console.warn('[push] blocked unsafe notification payload');
     return;
