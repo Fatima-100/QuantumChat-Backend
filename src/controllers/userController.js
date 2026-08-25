@@ -482,6 +482,19 @@ export async function updateNotificationSettings(req, res) {
       user.notificationSettings.callNotifications = call;
     }
 
+    if (settings.mediaSettings && typeof settings.mediaSettings === 'object') {
+      const media = {
+        ...(user.notificationSettings.mediaSettings?.toObject?.() ||
+          user.notificationSettings.mediaSettings ||
+          {}),
+      };
+      const m = settings.mediaSettings;
+      if (typeof m.autoDownloadImages === 'boolean') media.autoDownloadImages = m.autoDownloadImages;
+      if (typeof m.autoDownloadVideos === 'boolean') media.autoDownloadVideos = m.autoDownloadVideos;
+      if (typeof m.wifiOnly === 'boolean') media.wifiOnly = m.wifiOnly;
+      user.notificationSettings.mediaSettings = media;
+    }
+
     if (settings.webNotifications && typeof settings.webNotifications === 'object') {
       const web = {
         ...(user.notificationSettings.webNotifications?.toObject?.() ||
