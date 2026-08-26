@@ -1,8 +1,8 @@
 import CallSignal from '../models/CallSignal.js';
 import User from '../models/User.js';
-import { isSealedEnvelope, canUserInviteToCall } from '../utils/callEnvelope.js';
-import { toObjectId } from '../utils/toObjectId.js';
 import { notifyUser } from '../services/pushService.js';
+import { canUserInviteToCall, isSealedEnvelope } from '../utils/callEnvelope.js';
+import { toObjectId } from '../utils/toObjectId.js';
 
 const ALLOWED_EVENTS = new Set([
   'call:invite',
@@ -35,13 +35,22 @@ function toClientSignal(signal) {
 function pushIncomingCall(toUserId, event, callId) {
   if (event !== 'call:invite' && event !== 'meeting:invite') return;
   const isMeeting = event === 'meeting:invite';
+  // Caller identity is already visible to the server (it relays the call
+  // signal itself), unlike message content — showing it here doesn't cross
+  // the E2E boundary the way message plaintext would.
+  const callerName = caller?.displayName || caller?.username || 'Someone';
   notifyUser(toUserId, {
     title: 'QuantumChat',
-    body: isMeeting ? 'Incoming meeting' : 'Incoming call',
+    body: isMeeting ? `${callerName} started a meeting` : `Incoming call from ${callerName}`,
     kind: 'call',
     tag: `${isMeeting ? 'meeting' : 'call'}:${callId}`,
-    url: '/chat',
+    url: `/chat/${caller?._id || ''}`,
     requireInteraction: true,
+    actions: [
+      { action: 'accept_call', title: 'Pick Up' },
+      { action: 'decline_call', title: 'Decline' },
+    ],
+    data: { callId, fromUserId: String(caller?._id || '') },
   }).catch(() => {});
 }
 
@@ -92,7 +101,7 @@ export async function createCallSignal(req, res) {
       },
     });
 
-    pushIncomingCall(recipientId, event, callId.trim());
+    pushIncomingCall(recipientId, event, callId.trim(), req.user);
 
     return res.status(201).json({
       success: true,

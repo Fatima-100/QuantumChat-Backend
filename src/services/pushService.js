@@ -275,7 +275,10 @@ export async function notifyUser(userId, payload) {
     silent,
     requireInteraction: payload?.requireInteraction === true,
     url: payload?.url || '/chat',
-    data: { url: payload?.url || '/chat', kind: payload?.kind || 'dm' },
+     // Up to 2 actions render reliably across browsers; anything beyond
+    // that is silently dropped by most implementations anyway.
+    actions: Array.isArray(payload?.actions) ? payload.actions.slice(0, 2) : [],
+    data: { url: payload?.url || '/chat', kind: payload?.kind || 'dm', ...(payload?.data || {}) },
   });
 
   await Promise.all(
