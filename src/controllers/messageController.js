@@ -1,16 +1,15 @@
 import crypto from 'crypto';
 import mongoose from 'mongoose';
-import Message from '../models/Message.js';
-import Attachment from '../models/Attachment.js';
-import { areUsersBlocked } from './userController.js';
 import { getStorage } from '../middleware/upload.js';
-import User from '../models/User.js';
+import Attachment from '../models/Attachment.js';
 import Group from '../models/Group.js';
-import { sealForPublicKey } from '../utils/sealedBox.js';
-import { notifyUser } from '../services/pushService.js';
-import { conversationKey, clearedAtFor, parseConversationKey } from '../utils/conversationKey.js';
+import Message from '../models/Message.js';
+import User from '../models/User.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
-import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
+import { notifyUser } from '../services/pushService.js';
+import { clearedAtFor, conversationKey, parseConversationKey } from '../utils/conversationKey.js';
+import { notExpiredFilter, resolveExpiresAt } from '../utils/messageExpiry.js';
+import { sealForPublicKey } from '../utils/sealedBox.js';
 import { toObjectId } from '../utils/toObjectId.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
@@ -459,6 +458,11 @@ export async function sendMessage(req, res) {
         kind: 'dm',
         conversationKey: conversationKey({ from: req.user._id, to: toOid }),
         url: `/chat/${req.user._id}`,
+        actions: [
+          { action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type a reply…' },
+          { action: 'mark_read', title: 'Mark as Read' },
+        ],
+        data: { fromUserId: String(req.user._id) },
       }).catch(() => { });
     }
 
