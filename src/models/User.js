@@ -77,8 +77,8 @@ const privacySchema = new mongoose.Schema(
       default: 'everyone',
     },
     /**
-     * When true, this device blocks screenshots / screen recording on chats
-     * and profiles where the platform supports it (strongest on mobile).
+     * When true, other users cannot screenshot / screen-record this user's
+     * chats and profile on their device (strongest on mobile).
      */
     screenshotProtection: { type: Boolean, default: false },
   },
