@@ -95,6 +95,10 @@ export async function createStory(req, res) {
           ? req.body.caption.trim().slice(0, 200)
           : '';
 
+    const allowReplies = parseSealedFlag(
+      req.body.allowReplies === undefined ? true : req.body.allowReplies
+    );
+
     let envelopes;
     let contentIv;
     if (sealed) {
@@ -167,6 +171,7 @@ export async function createStory(req, res) {
       caption,
      expiresAt: new Date(Date.now() + ttlMs),
       sealed,
+      allowReplies,
       contentIv: sealed ? contentIv : undefined,
       envelopes: sealed ? envelopes : undefined,
     });
