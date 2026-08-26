@@ -32,7 +32,7 @@ function toClientSignal(signal) {
   };
 }
 
-function pushIncomingCall(toUserId, event, callId) {
+function pushIncomingCall(toUserId, event, callId, caller) {
   if (event !== 'call:invite' && event !== 'meeting:invite') return;
   const isMeeting = event === 'meeting:invite';
   // Caller identity is already visible to the server (it relays the call
