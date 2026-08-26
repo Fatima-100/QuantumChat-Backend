@@ -3,7 +3,7 @@ import crypto from 'crypto';
 /**
  * Process-local storage used only by automated tests. This keeps security
  * suites deterministic and offline without weakening the production rule
- * that durable blobs must use Google Drive.
+ * that durable blobs must use Cloudinary.
  */
 export class MemoryStorageAdapter {
   constructor() {

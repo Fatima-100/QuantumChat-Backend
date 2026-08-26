@@ -256,8 +256,10 @@ export async function notifyUser(userId, payload) {
   }
 
   // E2E: never put message plaintext or ciphertext into push payloads.
-  const title = String(payload?.title || 'QuantumChat').slice(0, 64);
-  const bodyText = String(payload?.body || 'New notification').slice(0, 120);
+  const rawTitle = String(payload?.title || 'QuantumChat');
+  const rawBody = String(payload?.body || 'New notification');
+  const title = Array.from(rawTitle).slice(0, 64).join('');
+  const bodyText = Array.from(rawBody).slice(0, 120).join('');
   if (/SECRET_E2E_|ciphertext|forRecipient|v=0/i.test(`${title}\n${bodyText}`)) {
     console.warn('[push] blocked unsafe notification payload');
     return;
@@ -273,7 +275,10 @@ export async function notifyUser(userId, payload) {
     silent,
     requireInteraction: payload?.requireInteraction === true,
     url: payload?.url || '/chat',
-    data: { url: payload?.url || '/chat', kind: payload?.kind || 'dm' },
+     // Up to 2 actions render reliably across browsers; anything beyond
+    // that is silently dropped by most implementations anyway.
+    actions: Array.isArray(payload?.actions) ? payload.actions.slice(0, 2) : [],
+    data: { url: payload?.url || '/chat', kind: payload?.kind || 'dm', ...(payload?.data || {}) },
   });
 
   await Promise.all(

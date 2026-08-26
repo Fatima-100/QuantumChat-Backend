@@ -4,6 +4,7 @@ import {
   getUser,
   updatePublicKeys,
   updateProfile,
+  updateLanguage,
   updatePrivacy,
   blockUser,
   unblockUser,
@@ -28,6 +29,7 @@ import {
   updateNotificationSettings,
   muteChat,
   unmuteChat,
+  clearConversation,
 } from '../controllers/userController.js';
 import {
   getPushVapidPublicKey,
@@ -68,12 +70,14 @@ router.get('/', listUsers);
 router.get('/me', getMe);
 router.get('/me/public-keys', getMyPublicKeys);
 router.patch('/me', updateProfile);
+router.patch('/me/language', updateLanguage);
 router.patch('/me/privacy', updatePrivacy);
 router.patch('/me/public-keys', updatePublicKeys);
 router.get('/me/notification-settings', getNotificationSettings);
 router.put('/me/notification-settings', updateNotificationSettings);
 router.post('/me/mute', muteChat);
 router.post('/me/unmute', unmuteChat);
+router.post('/me/clear-chat', clearConversation);
 router.get('/me/blocked', listBlockedUsers);
 router.get('/me/export', exportAccountData);
 router.delete('/me', deleteAccount);

@@ -36,7 +36,7 @@ const groupSchema = new mongoose.Schema(
     photoPath: { type: String },
     photoStorageProvider: {
       type: String,
-      enum: ['local', 'google-drive'],
+      enum: ['local', 'cloudinary'],
       default: null,
     },
     photoMimeType: { type: String },

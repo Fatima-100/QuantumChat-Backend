@@ -10,6 +10,7 @@ import { notifyUser } from '../services/pushService.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
 import { toObjectId } from '../utils/toObjectId.js';
+import { clearedAtFor } from '../utils/conversationKey.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 const ATTACHMENT_POPULATE =
@@ -1315,6 +1316,14 @@ export async function getGroupMessages(req, res) {
     };
     if (before && !Number.isNaN(before.getTime())) {
       filter.$and.push({ createdAt: { $lt: before } });
+    }
+
+    // "Clear chat" watermark: hide messages this member cleared for themselves
+    // (created at or before the clear moment). Per-user only — other members'
+    // views and the group itself are untouched, and new messages still appear.
+    const groupClearedAt = clearedAtFor(req.user.clearedConversations, `group:${groupOid}`);
+    if (groupClearedAt) {
+      filter.$and.push({ createdAt: { $gt: groupClearedAt } });
     }
 
     const rows = await Message.find(filter)
