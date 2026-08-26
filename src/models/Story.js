@@ -34,6 +34,7 @@ const storySchema = new mongoose.Schema(
     caption: { type: String, maxlength: 200, default: '' },
     expiresAt: { type: Date, required: true, index: true },
     sealed: { type: Boolean, default: false },
+     allowReplies: { type: Boolean, default: true },
     /** AES-GCM IV for sealed media (base64); content key is in per-viewer envelopes. */
     contentIv: { type: String, default: undefined },
     envelopes: { type: [storyEnvelopeSchema], default: undefined },
@@ -72,6 +73,7 @@ storySchema.methods.toPublicJSON = function toPublicJSON() {
     createdAt: this.createdAt,
     expiresAt: this.expiresAt,
     sealed: Boolean(this.sealed),
+    allowReplies: this.allowReplies !== false,
     contentIv: this.contentIv || undefined,
     envelopes: Array.isArray(this.envelopes)
       ? this.envelopes.map((e) => ({

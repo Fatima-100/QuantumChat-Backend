@@ -15,6 +15,7 @@ import messageRoutes from './routes/messageRoutes.js';
 import presenceRoutes from './routes/presenceRoutes.js';
 import publicApiRoutes from './routes/publicApiRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
+import gifRoutes from './routes/gifRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import activityRoutes from './routes/activityRoutes.js';
@@ -64,6 +65,7 @@ export function createApp() {
   );
 
   app.use(express.json({ limit: '100kb' }));
+  app.use('/api/gifs', gifRoutes);
 app.use('/api/activity', activityRoutes);
   app.get('/api/health', (req, res) => res.json({ success: true, data: { status: 'ok' } }));
 
