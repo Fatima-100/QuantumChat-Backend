@@ -21,8 +21,8 @@ const reportLimiter = rateLimit({
 
 router.post(
   "/",
-  requireAuth,
   reportLimiter,
+  requireAuth,
   createReport
 );
 
