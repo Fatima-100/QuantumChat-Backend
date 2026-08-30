@@ -68,7 +68,20 @@ export function createApp() {
   app.use(express.json({ limit: '100kb' }));
   app.use('/api/gifs', gifRoutes);
 app.use('/api/activity', activityRoutes);
-  app.get('/api/health', (req, res) => res.json({ success: true, data: { status: 'ok' } }));
+  app.get('/api/health', (req, res) => {
+    const cloudinaryConfigured = Boolean(
+      String(process.env.CLOUDINARY_CLOUD_NAME || '').trim() &&
+        String(process.env.CLOUDINARY_API_KEY || '').trim() &&
+        String(process.env.CLOUDINARY_API_SECRET || '').trim()
+    );
+    res.json({
+      success: true,
+      data: {
+        status: 'ok',
+        cloudinaryConfigured,
+      },
+    });
+  });
 
   // Serverless-safe trigger for the birthday-notification sweep. server.js's
     // setInterval only runs on a persistent process (local dev / non-serverless

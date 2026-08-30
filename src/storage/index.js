@@ -5,9 +5,15 @@ import { MemoryStorageAdapter } from './MemoryStorageAdapter.js';
 /** @type {CloudinaryStorageAdapter | LocalDiskStorageAdapter | MemoryStorageAdapter | null} */
 let cached;
 
+function envFlag(name) {
+  return String(process.env[name] || '').trim();
+}
+
 function hasCloudinaryCredentials() {
   return Boolean(
-    process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET
+    envFlag('CLOUDINARY_CLOUD_NAME') &&
+      envFlag('CLOUDINARY_API_KEY') &&
+      envFlag('CLOUDINARY_API_SECRET')
   );
 }
 
