@@ -368,7 +368,7 @@ async function callMicrosoftTransliterate(text, targetLang) {
 
   const config = MS_SCRIPT_MAP[targetLang];
   if (!config) {
-    console.warn(`[transliterationService] No MS_SCRIPT_MAP entry for language "${targetLang}" — skipping API call.`);
+    console.warn('[transliterationService] No MS_SCRIPT_MAP entry for language "%s" — skipping API call.', targetLang);
     return null;
   }
 
@@ -397,11 +397,11 @@ async function callMicrosoftTransliterate(text, targetLang) {
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
       if (response.status === 401 || response.status === 403) {
-        console.error(`[transliterationService] API AUTH ERROR (HTTP ${response.status}) for language "${targetLang}" — the MS_TRANSLATOR_KEY is likely invalid or expired. Response: ${errText}`);
+        console.error('[transliterationService] API AUTH ERROR (HTTP %d) for language "%s" — the MS_TRANSLATOR_KEY is likely invalid or expired. Response: %s', response.status, targetLang, errText);
       } else if (response.status === 429) {
-        console.error(`[transliterationService] API RATE LIMITED (HTTP 429) for language "${targetLang}" — falling back to built-in engine. Response: ${errText}`);
+        console.error('[transliterationService] API RATE LIMITED (HTTP 429) for language "%s" — falling back to built-in engine. Response: %s', targetLang, errText);
       } else {
-        console.error(`[transliterationService] API HTTP ERROR ${response.status} for language "${targetLang}": ${errText}`);
+        console.error('[transliterationService] API HTTP ERROR %d for language "%s": %s', response.status, targetLang, errText);
       }
       return null;
     }
@@ -411,13 +411,13 @@ async function callMicrosoftTransliterate(text, targetLang) {
       return data[0].text;
     }
 
-    console.warn(`[transliterationService] API returned unexpected response shape for language "${targetLang}":`, JSON.stringify(data).slice(0, 200));
+    console.warn('[transliterationService] API returned unexpected response shape for language "%s": %s', targetLang, JSON.stringify(data).slice(0, 200));
     return null;
   } catch (err) {
     if (err.name === 'AbortError') {
-      console.error(`[transliterationService] API TIMEOUT (3 s) for language "${targetLang}" — falling back to built-in engine.`);
+      console.error('[transliterationService] API TIMEOUT (3 s) for language "%s" — falling back to built-in engine.', targetLang);
     } else {
-      console.error(`[transliterationService] API NETWORK ERROR for language "${targetLang}":`, err.message);
+      console.error('[transliterationService] API NETWORK ERROR for language "%s": %s', targetLang, err.message);
     }
     return null;
   }
@@ -451,7 +451,7 @@ export async function transliterateText(text, targetLang) {
       return apiResult;
     }
     // API failed — fall through to dictionary then phonetic
-    console.log(`[transliterationService] API unavailable for "${trimmed}" → "${targetLang}", using fallback engine.`);
+    console.log('[transliterationService] API unavailable for "%s" → "%s", using fallback engine.', trimmed, targetLang);
   }
 
   // Dictionary lookup (high-accuracy curated names)
@@ -490,7 +490,7 @@ export async function generateTransliteratedNames(name) {
           result[lang] = trans;
         }
       } catch (err) {
-        console.error(`[transliterationService] Failed to generate transliteration for "${name}" into "${lang}":`, err.message);
+        console.error('[transliterationService] Failed to generate transliteration for "%s" into "%s": %s', name, lang, err.message);
       }
     })
   );
