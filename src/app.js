@@ -20,6 +20,7 @@ import reportRoutes from './routes/reportRoutes.js';
 import storyRoutes from './routes/storyRoutes.js';
 import trustRoutes from './routes/trustRoutes.js';
 import userRoutes from './routes/userRoutes.js';
+import { hasCloudinaryCredentials } from './storage/cloudinaryEnv.js';
 export function createApp() {
   const app = express();
 
@@ -69,16 +70,11 @@ export function createApp() {
   app.use('/api/gifs', gifRoutes);
 app.use('/api/activity', activityRoutes);
   app.get('/api/health', (req, res) => {
-    const cloudinaryConfigured = Boolean(
-      String(process.env.CLOUDINARY_CLOUD_NAME || '').trim() &&
-        String(process.env.CLOUDINARY_API_KEY || '').trim() &&
-        String(process.env.CLOUDINARY_API_SECRET || '').trim()
-    );
     res.json({
       success: true,
       data: {
         status: 'ok',
-        cloudinaryConfigured,
+        cloudinaryConfigured: hasCloudinaryCredentials(),
       },
     });
   });
