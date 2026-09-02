@@ -1189,15 +1189,20 @@ export async function sendGroupMessage(req, res) {
         io?.to(mid).emit('mention:new', { groupId, messageId: payload.id, from: String(req.user._id) });
       }
     }
-
     const senderId = String(req.user._id);
+    const mentionedSet = new Set(mentions.map(String));
     for (const mid of memberSet) {
       if (mid === senderId) continue;
+      const isMention = mentionedSet.has(mid);
       notifyUser(mid, {
-        title: 'QuantumChat',
-        body: isPublic ? 'New public group message' : 'New group message',
+        title: isMention ? `${req.user.username} mentioned you` : 'QuantumChat',
+        body: isMention
+          ? `You were mentioned in ${group.name}`
+          : isPublic
+            ? 'New public group message'
+            : 'New group message',
         kind: 'group',
-        isMention: mentions.map(String).includes(String(mid)),
+        isMention,
         conversationKey: `group:${groupId}`,
         url: `/chat/g/${groupId}`,
       }).catch(() => {});
