@@ -16,7 +16,7 @@ const HEX_64 = /^[0-9a-f]{64}$/i;
 const ATTACHMENT_POPULATE =
   'filename mimetype size nonce ephemeralPublicKey targetPublicKey forSenderNonce forSenderEphemeralPublicKey forSenderTargetPublicKey encryption secretboxNonce group';
 const MEMBER_POPULATE =
-  'username email publicKeys lastLoginAt keyRotatedAt avatarPath isSystemUser systemRole verified';
+  'username email publicKeys lastLoginAt keyRotatedAt avatarPath isSystemUser systemRole verified privacy friends';
 
 function validateEnvelope(envelope) {
   return (
