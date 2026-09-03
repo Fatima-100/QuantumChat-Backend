@@ -678,7 +678,19 @@ export async function clearConversation(req, res) {
       ];
     } else {
       nextList = [
-        ...already.filter((c) => !(c.conversationKey === key && scopes.includes(c.scope || 'all'))),
+        ...already.filter((c) => {
+          if (c.conversationKey !== key) return true;
+          // Entries with no `scope` field at all predate this feature and
+          // would otherwise be silently read as an 'all' clear forever
+          // (via the `c.scope || 'all'` fallback on the read side). Always
+          // drop them here — a scoped clear request replaces that stale,
+          // ambiguous watermark with the specific scope(s) actually asked
+          // for now. Legitimate scoped/'all' entries created *after* this
+          // feature shipped always have an explicit scope and are left
+          // alone unless the new request targets that same scope.
+          if (c.scope == null) return false;
+          return !scopes.includes(c.scope);
+        }),
         ...scopes.map((scope) => ({ conversationKey: key, scope, clearedAt })),
       ];
     }
