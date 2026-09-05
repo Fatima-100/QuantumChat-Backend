@@ -63,7 +63,7 @@ export async function createStory(req, res) {
     const mimetype = sealed && declaredMime ? declaredMime : req.file.mimetype;
     const mediaType =
       mediaTypeFromMime(mimetype) ||
-      (['image', 'video', 'audio'].includes(String(req.body.mediaType || ''))
+      (['image', 'video', 'audio', 'text'].includes(String(req.body.mediaType || ''))
         ? String(req.body.mediaType)
         : null);
 
@@ -408,7 +408,7 @@ export async function deleteStory(req, res) {
       return res.status(403).json({ success: false, error: 'Not authorized' });
     }
     try {
-      await getStorage().delete(story.storagePath);
+      if (story.storagePath) await getStorage().delete(story.storagePath);
     } catch {
       // ignore
     }
