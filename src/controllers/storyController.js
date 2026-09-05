@@ -214,7 +214,14 @@ export async function listStories(req, res) {
         if (!allowed) continue;
       }
       filtered.push({
-        ...story.toPublicJSON(),
+        ...(() => {
+          const pub = story.toPublicJSON();
+          // Only ship this viewer's envelope — smaller list payload, faster unlock.
+          if (pub.sealed && Array.isArray(pub.envelopes)) {
+            pub.envelopes = pub.envelopes.filter((e) => String(e.user) === viewerId);
+          }
+          return pub;
+        })(),
         user: {
           id: ownerId,
           username: story.user?.username || 'User',
