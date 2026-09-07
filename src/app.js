@@ -15,6 +15,7 @@ import chatThemeRoutes from './routes/chatThemeRoutes.js';
 import deviceLinkRoutes from './routes/deviceLinkRoutes.js';
 import gifRoutes from './routes/gifRoutes.js';
 import groupRoutes from './routes/groupRoutes.js';
+import highlightRoutes from './routes/highlightRoutes.js';
 import messageRoutes from './routes/messageRoutes.js';
 import presenceRoutes from './routes/presenceRoutes.js';
 import publicApiRoutes from './routes/publicApiRoutes.js';
@@ -136,6 +137,7 @@ app.use('/api/activity', activityRoutes);
   app.use('/api/attachments', attachmentRoutes);
   app.use('/api/groups', groupRoutes);
   app.use('/api/stories', storyRoutes);
+  app.use('/api/highlights', highlightRoutes);
   app.use('/api/reports', reportRoutes);
   app.use('/api/trust', trustRoutes);
   app.use('/api/call-signals', callSignalRoutes);
@@ -162,7 +164,10 @@ app.use('/api/activity', activityRoutes);
       });
     }
     if (err?.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ success: false, error: 'File too large' });
+      return res.status(400).json({
+        success: false,
+        error: 'File too large — status videos must be under 100MB (try a shorter clip)',
+      });
     }
     if (err?.name === 'MulterError') {
       return res.status(400).json({ success: false, error: err.message || 'Upload failed' });
