@@ -1,29 +1,16 @@
 import mongoose from 'mongoose';
-import { HIGHLIGHT_CATEGORY_IDS } from '../constants/highlightCategories.js';
-
-const MAX_ITEMS = 30;
 
 const highlightItemSchema = new mongoose.Schema(
   {
-    mediaType: { type: String, enum: ['image', 'video', 'audio', 'text'], required: true },
-    filename: { type: String, default: '' },
-    mimetype: { type: String, required: true },
-    size: { type: Number, required: true },
+    mediaType: { type: String, enum: ['image', 'video', 'audio'], required: true },
+    filename: String,
+    mimetype: String,
+    size: Number,
     storagePath: { type: String, required: true },
-    storageProvider: {
-      type: String,
-      enum: ['local', 'cloudinary', 'memory', 'none'],
-      default: 'cloudinary',
-    },
+    storageProvider: String,
     durationMs: { type: Number, default: 0 },
-    caption: { type: String, maxlength: 200, default: '' },
-    textContent: { type: String, maxlength: 700, default: '' },
-    textStyle: {
-      background: { type: String, maxlength: 40, default: '' },
-      font: { type: String, maxlength: 40, default: '' },
-      align: { type: String, enum: ['', 'left', 'center', 'right'], default: '' },
-    },
-    sourceStoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Story', default: null },
+    caption: { type: String, default: '', maxlength: 200 },
+    sourceStoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Story' },
     addedAt: { type: Date, default: Date.now },
   },
   { _id: true }
@@ -32,56 +19,40 @@ const highlightItemSchema = new mongoose.Schema(
 const highlightSchema = new mongoose.Schema(
   {
     owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    category: { type: String, enum: HIGHLIGHT_CATEGORY_IDS, required: true },
-    title: { type: String, maxlength: 40, default: '' },
+    name: { type: String, required: true, trim: true, maxlength: 40 },
+    order: { type: Number, default: 0 },
+    // Cover is independent of items once a user uploads a custom one —
+    // coverIsCustom stops item add/delete from silently replacing it.
     coverStoragePath: { type: String, default: '' },
     coverMimeType: { type: String, default: '' },
-    coverStorageProvider: {
-      type: String,
-      enum: ['local', 'cloudinary', 'memory', 'none', ''],
-      default: '',
-    },
-    items: { type: [highlightItemSchema], default: [] },
-    order: { type: Number, default: 0 },
+    coverStorageProvider: { type: String, default: '' },
+    coverIsCustom: { type: Boolean, default: false },
+    items: [highlightItemSchema],
   },
   { timestamps: true }
 );
 
-highlightSchema.index({ owner: 1, category: 1 }, { unique: true });
-highlightSchema.statics.maxItems = MAX_ITEMS;
+highlightSchema.index({ owner: 1, createdAt: 1 });
+
+highlightSchema.statics.maxItems = 100;
+highlightSchema.statics.maxPerUser = 50;
 
 highlightSchema.methods.toPublicJSON = function toPublicJSON() {
   return {
-    id: this._id,
-    owner: this.owner?._id || this.owner,
-    category: this.category,
-    title: this.title || '',
-    order: this.order || 0,
-    itemCount: Array.isArray(this.items) ? this.items.length : 0,
-    hasCover: Boolean(this.coverStoragePath) || (this.items || []).some((i) => i.mediaType === 'image'),
-    coverItemId:
-      this.coverStoragePath
-        ? null
-        : (this.items || []).find((i) => i.mediaType === 'image')?._id ||
-          (this.items || [])[0]?._id ||
-          null,
+    id: String(this._id),
+    owner: String(this.owner),
+    name: this.name,
+    order: this.order,
+    itemCount: this.items?.length || 0,
+    hasCover: Boolean(this.coverStoragePath),
     items: (this.items || []).map((item) => ({
-      id: item._id,
+      id: String(item._id),
       mediaType: item.mediaType,
       mimetype: item.mimetype,
       size: item.size,
-      durationMs: item.durationMs || 0,
-      caption: item.caption || '',
-      textContent: item.mediaType === 'text' ? item.textContent || '' : '',
-      textStyle:
-        item.mediaType === 'text'
-          ? {
-              background: item.textStyle?.background || '',
-              font: item.textStyle?.font || '',
-              align: item.textStyle?.align || 'center',
-            }
-          : undefined,
-      sourceStoryId: item.sourceStoryId || null,
+      durationMs: item.durationMs,
+      caption: item.caption,
+      sourceStoryId: item.sourceStoryId ? String(item.sourceStoryId) : null,
       addedAt: item.addedAt,
     })),
     createdAt: this.createdAt,
@@ -89,4 +60,4 @@ highlightSchema.methods.toPublicJSON = function toPublicJSON() {
   };
 };
 
-export default mongoose.model('Highlight', highlightSchema, 'highlights');
+export default mongoose.model('Highlight', highlightSchema);

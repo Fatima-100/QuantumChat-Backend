@@ -326,7 +326,8 @@ export async function getStoryById(req, res) {
     if (await areUsersBlocked(req.user._id, ownerId)) {
       return res.status(403).json({ success: false, error: 'Not allowed' });
     }
-    if ((story.status || 'published') === 'published' && story.sealed) {
+const viewerIsOwner = story && String(story.user?._id || story.user) === String(req.user._id);
+  if (!story || (story.expiresAt <= new Date() && !viewerIsOwner)) {
       const envelopes = story.envelopes || [];
       const allowed = envelopes.some((e) => String(e.user) === viewerId);
       if (!allowed) {
@@ -352,6 +353,59 @@ export async function getStoryById(req, res) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
+/** Owner-only: published stories whose expiresAt has passed but the row/blob is still here. */
+export async function listMyArchive(req, res) {
+  try {
+    const now = new Date();
+    const stories = await Story.find({
+      user: req.user._id,
+      status: 'published',
+      expiresAt: { $lte: now },
+    }).sort({ expiresAt: -1 });
+
+    res.json({
+      success: true,
+      data: stories.map((s) => storyOwnerPayload(s, req.user)),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** Re-publish an expired story: bumps expiresAt forward from now, moves it back into Active. */
+export async function reshareStory(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid story id' });
+    }
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ success: false, error: 'Story not found' });
+    if (String(story.user) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+    if ((story.status || 'published') !== 'published') {
+      return res.status(400).json({ success: false, error: 'Only published stories can be reshared' });
+    }
+    if (story.expiresAt > new Date()) {
+      return res.status(400).json({ success: false, error: 'Story is still active' });
+    }
+
+    if (req.body.ttlMs !== undefined) {
+      story.ttlMs = clampTtlMs(req.body.ttlMs);
+    }
+    story.expiresAt = new Date(Date.now() + (story.ttlMs || Story.ttlMs));
+    await story.save();
+
+    const payload = storyOwnerPayload(story, req.user);
+    const io = req.app.get('io');
+    if (io) io.emit('story:new', payload);
+
+    res.json({ success: true, data: payload });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
 
 export async function getStoryMedia(req, res) {
   try {
@@ -360,7 +414,8 @@ export async function getStoryMedia(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid story id' });
     }
     const story = await Story.findById(id);
-    if (!story || story.expiresAt <= new Date()) {
+   const viewerIsOwner = story && String(story.user) === String(req.user._id);
+   if (!story || (story.expiresAt <= new Date() && !viewerIsOwner)) {
       return res.status(404).json({ success: false, error: 'Story not found or expired' });
     }
     const viewerId = String(req.user._id);

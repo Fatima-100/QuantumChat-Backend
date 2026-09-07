@@ -1,30 +1,32 @@
 import { Router } from 'express';
 import {
   addHighlightItem,
+  createHighlight,
   deleteHighlight,
   deleteHighlightItem,
   getHighlight,
   getHighlightCover,
   getHighlightItemMedia,
-  listHighlightCategories,
   listHighlights,
+  updateHighlight,
 } from '../controllers/highlightController.js';
 import { requireAuthLean } from '../middleware/auth.js';
 import { apiLimiter } from '../middleware/rateLimiter.js';
-import { highlightUpload } from '../middleware/upload.js';
+import { highlightCoverUpload, highlightUpload } from '../middleware/upload.js';
 
 const router = Router();
 
 router.use(apiLimiter);
 router.use(requireAuthLean);
 
-router.get('/categories', listHighlightCategories);
 router.get('/', listHighlights);
-router.post('/items', highlightUpload.single('file'), addHighlightItem);
+router.post('/', highlightCoverUpload.single('cover'), createHighlight);
 router.get('/:id', getHighlight);
-router.delete('/:id', deleteHighlight);
-router.get('/:id/cover', getHighlightCover);
+router.patch('/:id', highlightCoverUpload.single('cover'), updateHighlight);
+router.post('/:id/items', highlightUpload.single('file'), addHighlightItem);
 router.delete('/:id/items/:itemId', deleteHighlightItem);
+router.get('/:id/cover', getHighlightCover);
 router.get('/:id/items/:itemId/media', getHighlightItemMedia);
+router.delete('/:id', deleteHighlight);
 
 export default router;
