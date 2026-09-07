@@ -114,7 +114,8 @@ export const highlightUpload = multer({
     if (
       SAFE_IMAGE_MIMES.has(type) ||
       type.startsWith('video/') ||
-      type.startsWith('audio/')
+      type.startsWith('audio/') ||
+      type === 'application/octet-stream'
     ) {
       return cb(null, true);
     }

@@ -1,4 +1,3 @@
-import mongoose from 'mongoose';
 import path from 'path';
 import {
   getHighlightCategory,
@@ -8,6 +7,7 @@ import {
 import { getStorage, isSafeImageMime, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Highlight from '../models/Highlight.js';
 import User from '../models/User.js';
+import { toObjectId } from '../utils/toObjectId.js';
 import { areUsersBlocked } from './userController.js';
 
 function mediaTypeFromMime(mimetype = '') {
@@ -18,9 +18,11 @@ function mediaTypeFromMime(mimetype = '') {
 }
 
 async function canViewProfile(viewer, ownerId) {
-  if (String(viewer._id) === String(ownerId)) return true;
-  if (await areUsersBlocked(viewer._id, ownerId)) return false;
-  const owner = await User.findById(ownerId).select('privacy blockedUsers friends');
+  const ownerOid = toObjectId(ownerId);
+  if (!ownerOid) return false;
+  if (String(viewer._id) === String(ownerOid)) return true;
+  if (await areUsersBlocked(viewer._id, ownerOid)) return false;
+  const owner = await User.findById(ownerOid).select('privacy blockedUsers friends');
   if (!owner) return false;
   const visibility = owner.privacy?.profileVisibility || 'everyone';
   if (visibility === 'nobody') return false;
@@ -42,8 +44,8 @@ export async function listHighlightCategories(_req, res) {
 
 export async function listHighlights(req, res) {
   try {
-    const userId = req.query.userId || req.user._id;
-    if (!mongoose.isValidObjectId(userId)) {
+    const userId = toObjectId(req.query.userId || req.user._id);
+    if (!userId) {
       return res.status(400).json({ success: false, error: 'Invalid user id' });
     }
     if (!(await canViewProfile(req.user, userId))) {
@@ -75,8 +77,8 @@ export async function listHighlights(req, res) {
 
 export async function getHighlight(req, res) {
   try {
-    const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) {
+    const id = toObjectId(req.params.id);
+    if (!id) {
       return res.status(400).json({ success: false, error: 'Invalid highlight id' });
     }
     const highlight = await Highlight.findById(id);
@@ -114,11 +116,15 @@ export async function addHighlightItem(req, res) {
     }
 
     const mimetype = req.file.mimetype || 'application/octet-stream';
-    const mediaType =
+    let mediaType =
       mediaTypeFromMime(mimetype) ||
       (['image', 'video', 'audio', 'text'].includes(String(req.body.mediaType || ''))
         ? String(req.body.mediaType)
         : null);
+    // Browser FormData sometimes sends ciphertext/JPEG as octet-stream.
+    if (!mediaType && mimetype === 'application/octet-stream') {
+      mediaType = 'image';
+    }
     if (!mediaType) {
       return res.status(400).json({ success: false, error: 'Unsupported media type' });
     }
@@ -145,10 +151,19 @@ export async function addHighlightItem(req, res) {
     const ext = path.extname(req.file.originalname || '').toLowerCase();
     const safeExt = ext === '.svg' ? '' : ext;
     const objectName = newObjectName('highlights', safeExt);
+    const storeMime =
+      mimetype === 'application/octet-stream'
+        ? mediaType === 'video'
+          ? 'video/mp4'
+          : mediaType === 'audio'
+            ? 'audio/mp4'
+            : 'image/jpeg'
+        : mimetype;
+
     const stored = await getStorage().put(
       req.file.buffer,
       objectName,
-      mimetype,
+      storeMime,
       String(req.user._id)
     );
 
@@ -158,15 +173,12 @@ export async function addHighlightItem(req, res) {
     const caption =
       typeof req.body.caption === 'string' ? req.body.caption.trim().slice(0, 200) : '';
 
-    const sourceStoryId =
-      req.body.sourceStoryId && mongoose.isValidObjectId(req.body.sourceStoryId)
-        ? req.body.sourceStoryId
-        : null;
+    const sourceStoryId = toObjectId(req.body.sourceStoryId);
 
     const item = {
       mediaType,
       filename: req.file.originalname || objectName,
-      mimetype,
+      mimetype: storeMime,
       size: req.file.size,
       storagePath: stored.key,
       storageProvider: stored.provider,
@@ -181,11 +193,11 @@ export async function addHighlightItem(req, res) {
     // Prefer first image as cover.
     if (!highlight.coverStoragePath && mediaType === 'image') {
       highlight.coverStoragePath = stored.key;
-      highlight.coverMimeType = mimetype;
+      highlight.coverMimeType = storeMime;
       highlight.coverStorageProvider = stored.provider;
     } else if (!highlight.coverStoragePath && highlight.items.length === 1) {
       highlight.coverStoragePath = stored.key;
-      highlight.coverMimeType = mimetype;
+      highlight.coverMimeType = storeMime;
       highlight.coverStorageProvider = stored.provider;
     }
 
@@ -210,8 +222,8 @@ export async function addHighlightItem(req, res) {
 
 export async function deleteHighlight(req, res) {
   try {
-    const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) {
+    const id = toObjectId(req.params.id);
+    if (!id) {
       return res.status(400).json({ success: false, error: 'Invalid highlight id' });
     }
     const highlight = await Highlight.findById(id);
@@ -242,8 +254,9 @@ export async function deleteHighlight(req, res) {
 
 export async function deleteHighlightItem(req, res) {
   try {
-    const { id, itemId } = req.params;
-    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(itemId)) {
+    const id = toObjectId(req.params.id);
+    const itemId = toObjectId(req.params.itemId);
+    if (!id || !itemId) {
       return res.status(400).json({ success: false, error: 'Invalid id' });
     }
     const highlight = await Highlight.findById(id);
@@ -295,8 +308,8 @@ export async function deleteHighlightItem(req, res) {
 
 export async function getHighlightCover(req, res) {
   try {
-    const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) {
+    const id = toObjectId(req.params.id);
+    if (!id) {
       return res.status(400).json({ success: false, error: 'Invalid highlight id' });
     }
     const highlight = await Highlight.findById(id);
@@ -335,8 +348,9 @@ export async function getHighlightCover(req, res) {
 
 export async function getHighlightItemMedia(req, res) {
   try {
-    const { id, itemId } = req.params;
-    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(itemId)) {
+    const id = toObjectId(req.params.id);
+    const itemId = toObjectId(req.params.itemId);
+    if (!id || !itemId) {
       return res.status(400).json({ success: false, error: 'Invalid id' });
     }
     const highlight = await Highlight.findById(id);
