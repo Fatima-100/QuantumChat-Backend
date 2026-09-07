@@ -125,6 +125,12 @@ export const highlightUpload = multer({
   },
 });
 
+export const highlightCoverUpload = multer({
+  storage: memory,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: rasterImageFilter('Highlight cover'),
+});
+
 /** Display / storage object name helper (not a filesystem path). */
 export function newObjectName(prefix = '', ext = '') {
   const safePrefix = String(prefix || '')
