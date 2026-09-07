@@ -102,6 +102,27 @@ export const storyUpload = multer({
   },
 });
 
+export const highlightUpload = multer({
+  storage: memory,
+  limits: { fileSize: 40 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const type = String(file.mimetype || '').toLowerCase();
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (type === 'image/svg+xml' || ext === '.svg') {
+      return cb(new Error('SVG highlights are not allowed'));
+    }
+    if (
+      SAFE_IMAGE_MIMES.has(type) ||
+      type.startsWith('video/') ||
+      type.startsWith('audio/') ||
+      type === 'application/octet-stream'
+    ) {
+      return cb(null, true);
+    }
+    cb(new Error('Highlight must be an image, video, or audio file'));
+  },
+});
+
 /** Display / storage object name helper (not a filesystem path). */
 export function newObjectName(prefix = '', ext = '') {
   const safePrefix = String(prefix || '')
