@@ -83,7 +83,9 @@ export const wallpaperUpload = multer({
 
 export const storyUpload = multer({
   storage: memory,
-  limits: { fileSize: 40 * 1024 * 1024 },
+  // Phone videos are often large; client compresses first, but leave headroom
+  // for sealed ciphertext and short uncompressed clips.
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const type = String(file.mimetype || '').toLowerCase();
     const ext = path.extname(file.originalname || '').toLowerCase();
