@@ -164,7 +164,10 @@ app.use('/api/activity', activityRoutes);
       });
     }
     if (err?.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ success: false, error: 'File too large' });
+      return res.status(400).json({
+        success: false,
+        error: 'File too large — status videos must be under 100MB (try a shorter clip)',
+      });
     }
     if (err?.name === 'MulterError') {
       return res.status(400).json({ success: false, error: err.message || 'Upload failed' });
