@@ -315,19 +315,19 @@ export async function getStoryById(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid story id' });
     }
     const story = await Story.findById(id).populate('user', 'username avatarPath');
-    if (!story || story.expiresAt <= new Date()) {
+    const ownerId = story ? String(story.user?._id || story.user) : null;
+    const viewerId = String(req.user._id);
+    const viewerIsOwner = Boolean(story) && ownerId === viewerId;
+    if (!story || (story.expiresAt <= new Date() && !viewerIsOwner)) {
       return res.status(404).json({ success: false, error: 'Story not found or expired' });
     }
-    const ownerId = String(story.user?._id || story.user);
-    const viewerId = String(req.user._id);
     if (!assertLiveOrOwner(story, viewerId)) {
       return res.status(404).json({ success: false, error: 'Story not found or expired' });
     }
     if (await areUsersBlocked(req.user._id, ownerId)) {
       return res.status(403).json({ success: false, error: 'Not allowed' });
     }
-const viewerIsOwner = story && String(story.user?._id || story.user) === String(req.user._id);
-  if (!story || (story.expiresAt <= new Date() && !viewerIsOwner)) {
+    if ((story.status || 'published') === 'published' && story.sealed) {
       const envelopes = story.envelopes || [];
       const allowed = envelopes.some((e) => String(e.user) === viewerId);
       if (!allowed) {
