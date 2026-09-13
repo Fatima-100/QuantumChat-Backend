@@ -286,11 +286,28 @@ export async function listStories(req, res) {
       .populate('user', 'username avatarPath');
 
     const viewerId = String(req.user._id);
+    const ownerIds = [
+      ...new Set(
+        stories
+          .map((s) => String(s.user?._id || s.user || ''))
+          .filter((id) => id && !blocked.has(id) && id !== viewerId),
+      ),
+    ];
+    // One query for "who blocked me" instead of N areUsersBlocked round-trips.
+    const reverseBlocked = new Set();
+    if (ownerIds.length) {
+      const blockers = await User.find({
+        _id: { $in: ownerIds },
+        blockedUsers: req.user._id,
+      }).select('_id');
+      for (const u of blockers) reverseBlocked.add(String(u._id));
+    }
+
     const filtered = [];
     for (const story of stories) {
       const ownerId = String(story.user?._id || story.user);
       if (blocked.has(ownerId)) continue;
-      if (await areUsersBlocked(req.user._id, ownerId)) continue;
+      if (reverseBlocked.has(ownerId)) continue;
       if (story.viewOnce && ownerId !== viewerId && hasViewerConsumed(story, viewerId)) continue;
       if (story.sealed) {
         const envelopes = story.envelopes || [];
