@@ -1,7 +1,9 @@
 import mongoose from 'mongoose';
 import path from 'path';
+import crypto from 'crypto';
 import { getStorage, isSafeImageMime, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Story from '../models/Story.js';
+import User from '../models/User.js';
 import { areUsersBlocked } from './userController.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
@@ -17,6 +19,68 @@ function parseSealedFlag(value) {
   if (value === true || value === 1) return true;
   const s = String(value || '').toLowerCase();
   return s === 'true' || s === '1' || s === 'yes';
+}
+
+// Dedicated secret preferred; falls back to JWT secret so this works out of the box.
+// Set STORY_VIEW_HASH_SECRET in production for a value independent of your auth secret.
+const STORY_VIEW_HASH_SECRET =
+  process.env.STORY_VIEW_HASH_SECRET || process.env.JWT_SECRET || 'quantumchat-story-view-fallback';
+
+function hashAnonymousViewer(storyId, viewerId) {
+  return crypto
+    .createHmac('sha256', STORY_VIEW_HASH_SECRET)
+    .update(`${storyId}:${viewerId}`)
+    .digest('hex');
+}
+
+/** True if this viewer has already fully consumed a viewOnce story (named or anonymous). */
+function hasViewerConsumed(story, viewerId) {
+  const namedConsumed = (story.views || []).some(
+    (v) => String(v.user?._id || v.user) === String(viewerId) && v.consumed
+  );
+  if (namedConsumed) return true;
+  const hash = hashAnonymousViewer(story._id, viewerId);
+  return (story.anonymousViewerHashes || []).includes(hash);
+}
+
+function parseStoryStatus(raw) {
+  const s = String(raw || 'published').toLowerCase();
+  if (s === 'draft' || s === 'scheduled' || s === 'published') return s;
+  return null;
+}
+
+function clampTtlMs(raw) {
+  let ttlMs = Number(raw || 0);
+  const fallback = Story?.ttlMs || 24 * 60 * 60 * 1000;
+  const min = Story?.minTtlMs || 15 * 60 * 1000;
+  const max = Story?.maxTtlMs || 7 * 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) ttlMs = fallback;
+  return Math.min(Math.max(ttlMs, min), max);
+}
+
+function parsePublishAt(raw) {
+  if (raw == null || raw === '') return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function storyOwnerPayload(story, userDoc) {
+  return {
+    ...story.toPublicJSON(),
+    user: {
+      id: userDoc?._id || story.user,
+      username: userDoc?.username || 'User',
+      hasAvatar: Boolean(userDoc?.avatarPath),
+    },
+  };
+}
+
+function assertLiveOrOwner(story, viewerId) {
+  const status = story.status || 'published';
+  const ownerId = String(story.user?._id || story.user);
+  if (status === 'published') return true;
+  return ownerId === String(viewerId);
 }
 
 function parseEnvelopes(raw) {
@@ -63,7 +127,7 @@ export async function createStory(req, res) {
     const mimetype = sealed && declaredMime ? declaredMime : req.file.mimetype;
     const mediaType =
       mediaTypeFromMime(mimetype) ||
-      (['image', 'video', 'audio'].includes(String(req.body.mediaType || ''))
+      (['image', 'video', 'audio', 'text'].includes(String(req.body.mediaType || ''))
         ? String(req.body.mediaType)
         : null);
 
@@ -81,11 +145,22 @@ export async function createStory(req, res) {
     }
     if (mediaType === 'image') durationMs = 0;
 
-    let ttlMs = Number(req.body.ttlMs || 0);
-    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-      ttlMs = Story.ttlMs; // fallback to default (24h)
-    } else {
-      ttlMs = Math.min(Math.max(ttlMs, Story.minTtlMs), Story.maxTtlMs);
+    let ttlMs = clampTtlMs(req.body.ttlMs);
+
+    const status = parseStoryStatus(req.body.status);
+    if (!status) {
+      return res.status(400).json({ success: false, error: 'Invalid status (draft, scheduled, or published)' });
+    }
+
+    let publishAt = null;
+    if (status === 'scheduled') {
+      publishAt = parsePublishAt(req.body.publishAt);
+      if (!publishAt || publishAt.getTime() <= Date.now() + 30_000) {
+        return res.status(400).json({
+          success: false,
+          error: 'Scheduled stories need a publishAt at least 30 seconds in the future',
+        });
+      }
     }
 
     const caption =
@@ -98,7 +173,7 @@ export async function createStory(req, res) {
     const allowReplies = parseSealedFlag(
       req.body.allowReplies === undefined ? true : req.body.allowReplies
     );
-
+    const viewOnce = parseSealedFlag(req.body.viewOnce);
     let envelopes;
     let contentIv;
     if (sealed) {
@@ -117,10 +192,6 @@ export async function createStory(req, res) {
         });
       }
 
-      // --- Story privacy enforcement (new) ---
-      // Reject envelopes for viewers outside the author's configured story
-      // audience. Clients build the envelope list themselves, so this can't
-      // be trusted without a server-side check.
       const storyPrivacy = req.user.privacy?.story || 'everyone';
       if (storyPrivacy !== 'everyone') {
         const authorId = String(req.user._id);
@@ -159,6 +230,16 @@ export async function createStory(req, res) {
       String(req.user._id)
     );
 
+    const now = Date.now();
+    let expiresAt;
+    if (status === 'draft') {
+      expiresAt = new Date(now + Story.draftRetentionMs);
+    } else if (status === 'scheduled') {
+      expiresAt = new Date(publishAt.getTime() + ttlMs);
+    } else {
+      expiresAt = new Date(now + ttlMs);
+    }
+
     const story = await Story.create({
       user: req.user._id,
       mediaType,
@@ -169,24 +250,23 @@ export async function createStory(req, res) {
       storageProvider: stored.provider,
       durationMs,
       caption,
-     expiresAt: new Date(Date.now() + ttlMs),
+      ttlMs,
+      status,
+      publishAt: status === 'scheduled' ? publishAt : null,
+      expiresAt,
       sealed,
       allowReplies,
+      viewOnce,
       contentIv: sealed ? contentIv : undefined,
       envelopes: sealed ? envelopes : undefined,
     });
 
-    const payload = {
-      ...story.toPublicJSON(),
-      user: {
-        id: req.user._id,
-        username: req.user.username,
-        hasAvatar: Boolean(req.user.avatarPath),
-      },
-    };
+    const payload = storyOwnerPayload(story, req.user);
 
-    const io = req.app.get('io');
-    if (io) io.emit('story:new', payload);
+    if (status === 'published') {
+      const io = req.app.get('io');
+      if (io) io.emit('story:new', payload);
+    }
 
     res.status(201).json({ success: true, data: payload });
   } catch (err) {
@@ -198,23 +278,50 @@ export async function listStories(req, res) {
   try {
     const now = new Date();
     const blocked = new Set((req.user.blockedUsers || []).map(String));
-    const stories = await Story.find({ expiresAt: { $gt: now } })
+    const stories = await Story.find({
+      status: { $nin: ['draft', 'scheduled'] },
+      expiresAt: { $gt: now },
+    })
       .sort({ createdAt: -1 })
       .populate('user', 'username avatarPath');
 
     const viewerId = String(req.user._id);
+    const ownerIds = [
+      ...new Set(
+        stories
+          .map((s) => String(s.user?._id || s.user || ''))
+          .filter((id) => id && !blocked.has(id) && id !== viewerId),
+      ),
+    ];
+    // One query for "who blocked me" instead of N areUsersBlocked round-trips.
+    const reverseBlocked = new Set();
+    if (ownerIds.length) {
+      const blockers = await User.find({
+        _id: { $in: ownerIds },
+        blockedUsers: req.user._id,
+      }).select('_id');
+      for (const u of blockers) reverseBlocked.add(String(u._id));
+    }
+
     const filtered = [];
     for (const story of stories) {
       const ownerId = String(story.user?._id || story.user);
       if (blocked.has(ownerId)) continue;
-      if (await areUsersBlocked(req.user._id, ownerId)) continue;
+      if (reverseBlocked.has(ownerId)) continue;
+      if (story.viewOnce && ownerId !== viewerId && hasViewerConsumed(story, viewerId)) continue;
       if (story.sealed) {
         const envelopes = story.envelopes || [];
         const allowed = envelopes.some((e) => String(e.user) === viewerId);
         if (!allowed) continue;
       }
       filtered.push({
-        ...story.toPublicJSON(),
+        ...(() => {
+          const pub = story.toPublicJSON();
+          if (pub.sealed && Array.isArray(pub.envelopes)) {
+            pub.envelopes = pub.envelopes.filter((e) => String(e.user) === viewerId);
+          }
+          return pub;
+        })(),
         user: {
           id: ownerId,
           username: story.user?.username || 'User',
@@ -228,6 +335,25 @@ export async function listStories(req, res) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
+
+/** Owner-only drafts + scheduled stories. */
+export async function listMyDrafts(req, res) {
+  try {
+    const now = new Date();
+    const stories = await Story.find({
+      user: req.user._id,
+      status: { $in: ['draft', 'scheduled'] },
+      expiresAt: { $gt: now },
+    }).sort({ updatedAt: -1 });
+
+    res.json({
+      success: true,
+      data: stories.map((s) => storyOwnerPayload(s, req.user)),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
 export async function getStoryById(req, res) {
   try {
     const { id } = req.params;
@@ -235,24 +361,36 @@ export async function getStoryById(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid story id' });
     }
     const story = await Story.findById(id).populate('user', 'username avatarPath');
-    if (!story || story.expiresAt <= new Date()) {
+    const ownerId = story ? String(story.user?._id || story.user) : null;
+    const viewerId = String(req.user._id);
+    const viewerIsOwner = Boolean(story) && ownerId === viewerId;
+    if (!story || (story.expiresAt <= new Date() && !viewerIsOwner)) {
       return res.status(404).json({ success: false, error: 'Story not found or expired' });
     }
-    const ownerId = String(story.user?._id || story.user);
+    if (!assertLiveOrOwner(story, viewerId)) {
+      return res.status(404).json({ success: false, error: 'Story not found or expired' });
+    }
     if (await areUsersBlocked(req.user._id, ownerId)) {
       return res.status(403).json({ success: false, error: 'Not allowed' });
     }
-    if (story.sealed) {
+    if (story.viewOnce && ownerId !== viewerId && hasViewerConsumed(story, viewerId)) {
+      return res.status(404).json({ success: false, error: 'Story not found or expired' });
+    }
+    if ((story.status || 'published') === 'published' && story.sealed) {
       const envelopes = story.envelopes || [];
-      const allowed = envelopes.some((e) => String(e.user) === String(req.user._id));
+      const allowed = envelopes.some((e) => String(e.user) === viewerId);
       if (!allowed) {
         return res.status(404).json({ success: false, error: 'Story not found or expired' });
       }
     }
+    const pub = story.toPublicJSON();
+    if (pub.sealed && Array.isArray(pub.envelopes) && ownerId !== viewerId) {
+      pub.envelopes = pub.envelopes.filter((e) => String(e.user) === viewerId);
+    }
     res.json({
       success: true,
       data: {
-        ...story.toPublicJSON(),
+        ...pub,
         user: {
           id: ownerId,
           username: story.user?.username || 'User',
@@ -264,6 +402,60 @@ export async function getStoryById(req, res) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
+/** Owner-only: published stories whose expiresAt has passed but the row/blob is still here. */
+export async function listMyArchive(req, res) {
+  try {
+    const now = new Date();
+    const stories = await Story.find({
+      user: req.user._id,
+      status: 'published',
+      expiresAt: { $lte: now },
+    }).sort({ expiresAt: -1 });
+
+    res.json({
+      success: true,
+      data: stories.map((s) => storyOwnerPayload(s, req.user)),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** Re-publish an expired story: bumps expiresAt forward from now, moves it back into Active. */
+export async function reshareStory(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid story id' });
+    }
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ success: false, error: 'Story not found' });
+    if (String(story.user) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+    if ((story.status || 'published') !== 'published') {
+      return res.status(400).json({ success: false, error: 'Only published stories can be reshared' });
+    }
+    if (story.expiresAt > new Date()) {
+      return res.status(400).json({ success: false, error: 'Story is still active' });
+    }
+
+    if (req.body?.ttlMs !== undefined) {
+      story.ttlMs = clampTtlMs(req.body.ttlMs);
+    }
+    story.expiresAt = new Date(Date.now() + (story.ttlMs || Story.ttlMs || 24 * 60 * 60 * 1000));
+    await story.save();
+
+    const payload = storyOwnerPayload(story, req.user);
+    const io = req.app.get('io');
+    if (io) io.emit('story:new', payload);
+
+    res.json({ success: true, data: payload });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 export async function getStoryMedia(req, res) {
   try {
     const { id } = req.params;
@@ -271,16 +463,25 @@ export async function getStoryMedia(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid story id' });
     }
     const story = await Story.findById(id);
-    if (!story || story.expiresAt <= new Date()) {
+   const viewerIsOwner = story && String(story.user) === String(req.user._id);
+   if (!story || (story.expiresAt <= new Date() && !viewerIsOwner)) {
+      return res.status(404).json({ success: false, error: 'Story not found or expired' });
+    }
+    const viewerId = String(req.user._id);
+    if (!assertLiveOrOwner(story, viewerId)) {
       return res.status(404).json({ success: false, error: 'Story not found or expired' });
     }
     if (await areUsersBlocked(req.user._id, story.user)) {
       return res.status(403).json({ success: false, error: 'Not allowed' });
     }
 
+    if (story.viewOnce && !viewerIsOwner && hasViewerConsumed(story, viewerId)) {
+      return res.status(404).json({ success: false, error: 'Story not found or expired' });
+    }
+
     if (story.sealed) {
       const envelopes = story.envelopes || [];
-      const allowed = envelopes.some((e) => String(e.user) === String(req.user._id));
+      const allowed = envelopes.some((e) => String(e.user) === viewerId);
       if (!allowed) {
         return res.status(403).json({
           success: false,
@@ -317,7 +518,6 @@ export async function getStoryMedia(req, res) {
     }
   }
 }
-
 /** Records that the current user viewed a story. Called once per open. */
 export async function markStoryViewed(req, res) {
   try {
@@ -326,13 +526,12 @@ export async function markStoryViewed(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid story id' });
     }
     const story = await Story.findById(id);
-    if (!story || story.expiresAt <= new Date()) {
+    if (!story || story.expiresAt <= new Date() || (story.status || 'published') !== 'published') {
       return res.status(404).json({ success: false, error: 'Story not found or expired' });
     }
     const ownerId = String(story.user);
     const viewerId = String(req.user._id);
 
-    // Don't record self-views, and respect the same blocked-user gate as reads.
     if (viewerId === ownerId) {
       return res.json({ success: true, data: { recorded: false } });
     }
@@ -340,32 +539,70 @@ export async function markStoryViewed(req, res) {
       return res.status(403).json({ success: false, error: 'Not allowed' });
     }
 
-    const result = await Story.updateOne(
-  { _id: id, 'views.user': { $ne: req.user._id } },
-  { $push: { views: { user: req.user._id, viewedAt: new Date() } } }
-  );
-  const wasNewView = result.modifiedCount === 1;
+    // Server decides anonymity from the account setting — never trust a client-sent flag,
+    // since that would let someone toggle it off just to peek at their own viewer list.
+    const wantsAnonymous = Boolean(req.user.privacy?.viewStoriesAnonymously);
+    let wasNewView = false;
 
-  if (wasNewView) {
-    const io = req.app.get('io');
-    if (io) {
-      const updated = await Story.findById(id).select('views');
-      io.to(ownerId).emit('story:viewed', {
-        storyId: String(story._id),
-        viewer: { id: viewerId, username: req.user.username, hasAvatar: Boolean(req.user.avatarPath) },
-        viewedAt: new Date().toISOString(),
-        viewerCount: updated.views.length,
-      });
+    if (wantsAnonymous) {
+      const hash = hashAnonymousViewer(story._id, req.user._id);
+      const result = await Story.updateOne(
+        { _id: id, anonymousViewerHashes: { $ne: hash } },
+        { $push: { anonymousViewerHashes: hash }, $inc: { anonymousViewCount: 1 } }
+      );
+      wasNewView = result.modifiedCount === 1;
+    } else {
+      const result = await Story.updateOne(
+        { _id: id, 'views.user': { $ne: req.user._id } },
+        {
+          $push: {
+            views: { user: req.user._id, viewedAt: new Date(), consumed: Boolean(story.viewOnce) },
+          },
+        }
+      );
+      wasNewView = result.modifiedCount === 1;
     }
-  }
+
+    if (wasNewView) {
+      const io = req.app.get('io');
+      if (io) {
+        const [updated, owner] = await Promise.all([
+          Story.findById(id).select('views anonymousViewCount'),
+          User.findById(ownerId).select('privacy.viewStoriesAnonymously'),
+        ]);
+        const totalViewerCount =
+          (updated?.views?.length || 0) + (updated?.anonymousViewCount || 0);
+        const ownerHidesViewers = Boolean(owner?.privacy?.viewStoriesAnonymously);
+
+        if (wantsAnonymous || ownerHidesViewers) {
+          io.to(ownerId).emit('story:viewed', {
+            storyId: String(story._id),
+            anonymous: true,
+            viewedAt: new Date().toISOString(),
+            viewerCount: totalViewerCount,
+          });
+        } else {
+          io.to(ownerId).emit('story:viewed', {
+            storyId: String(story._id),
+            viewer: {
+              id: viewerId,
+              username: req.user.username,
+              hasAvatar: Boolean(req.user.avatarPath),
+            },
+            viewedAt: new Date().toISOString(),
+            viewerCount: totalViewerCount,
+          });
+        }
+      }
+    }
 
     res.json({ success: true, data: { recorded: wasNewView } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
-
 /** Returns the viewer list for a story. Owner-only. */
+
 export async function getStoryViewers(req, res) {
   try {
     const { id } = req.params;
@@ -380,6 +617,25 @@ export async function getStoryViewers(req, res) {
       return res.status(403).json({ success: false, error: 'Not authorized' });
     }
 
+    const anonymousViewCount = story.anonymousViewCount || 0;
+    const totalViewerCount = (story.views || []).length + anonymousViewCount;
+
+    // Reciprocity rule: an account that views others' stories anonymously forfeits
+    // the ability to see who viewed its own stories. Count only, identities withheld.
+    if (req.user.privacy?.viewStoriesAnonymously) {
+      return res.json({
+        success: true,
+        data: {
+          viewerCount: totalViewerCount,
+          viewers: [],
+          anonymousViewCount,
+          viewersHidden: true,
+          viewersHiddenReason:
+            'Turn off "View stories anonymously" in Settings to see who viewed your stories',
+        },
+      });
+    }
+
     const viewers = (story.views || [])
       .slice()
       .sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt))
@@ -390,7 +646,119 @@ export async function getStoryViewers(req, res) {
         viewedAt: v.viewedAt,
       }));
 
-    res.json({ success: true, data: { viewerCount: viewers.length, viewers } });
+    res.json({
+      success: true,
+      data: {
+        viewerCount: totalViewerCount,
+        viewers,
+        anonymousViewCount,
+        viewersHidden: false,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+/** Update draft/scheduled settings (ttl, schedule, allowReplies, caption). */
+export async function updateStory(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid story id' });
+    }
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ success: false, error: 'Story not found' });
+    if (String(story.user) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+    if (!['draft', 'scheduled'].includes(story.status || '')) {
+      return res.status(400).json({ success: false, error: 'Only drafts or scheduled stories can be edited' });
+    }
+
+    if (req.body?.ttlMs !== undefined) {
+      story.ttlMs = clampTtlMs(req.body.ttlMs);
+    }
+    if (req.body?.allowReplies !== undefined) {
+      story.allowReplies = parseSealedFlag(req.body.allowReplies);
+    }
+    if (!story.sealed && typeof req.body?.caption === 'string') {
+      story.caption = req.body.caption.trim().slice(0, 200);
+    }
+
+    const nextStatus = req.body?.status !== undefined ? parseStoryStatus(req.body.status) : story.status;
+    if (!nextStatus || nextStatus === 'published') {
+      // Publishing goes through publishStory
+      if (req.body?.status === 'published') {
+        return res.status(400).json({
+          success: false,
+          error: 'Use POST /stories/:id/publish to publish',
+        });
+      }
+      if (!nextStatus) {
+        return res.status(400).json({ success: false, error: 'Invalid status' });
+      }
+    }
+
+    if (nextStatus === 'draft') {
+      story.status = 'draft';
+      story.publishAt = null;
+      story.expiresAt = new Date(Date.now() + Story.draftRetentionMs);
+    } else if (nextStatus === 'scheduled') {
+      const publishAt =
+        req.body?.publishAt !== undefined ? parsePublishAt(req.body.publishAt) : story.publishAt;
+      if (!publishAt || publishAt.getTime() <= Date.now() + 30_000) {
+        return res.status(400).json({
+          success: false,
+          error: 'Scheduled stories need a publishAt at least 30 seconds in the future',
+        });
+      }
+      story.status = 'scheduled';
+      story.publishAt = publishAt;
+      story.expiresAt = new Date(publishAt.getTime() + (story.ttlMs || Story.ttlMs));
+    }
+
+    await story.save();
+    res.json({ success: true, data: storyOwnerPayload(story, req.user) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** Publish a draft or scheduled story immediately. */
+export async function publishStory(req, res) {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid story id' });
+    }
+    const story = await Story.findById(id);
+    if (!story) return res.status(404).json({ success: false, error: 'Story not found' });
+    if (String(story.user) !== String(req.user._id)) {
+      return res.status(403).json({ success: false, error: 'Not authorized' });
+    }
+    if (!['draft', 'scheduled'].includes(story.status || '')) {
+      return res.status(400).json({ success: false, error: 'Story is already published' });
+    }
+
+    if (req.body?.ttlMs !== undefined) {
+      story.ttlMs = clampTtlMs(req.body.ttlMs);
+    }
+    if (req.body?.allowReplies !== undefined) {
+      story.allowReplies = parseSealedFlag(req.body.allowReplies);
+    }
+
+    const now = Date.now();
+    const ttl = story.ttlMs || Story.ttlMs || 24 * 60 * 60 * 1000;
+    story.status = 'published';
+    story.publishAt = new Date(now);
+    story.expiresAt = new Date(now + ttl);
+    await story.save();
+
+    const payload = storyOwnerPayload(story, req.user);
+    const io = req.app.get('io');
+    if (io) io.emit('story:new', payload);
+
+    res.json({ success: true, data: payload });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -408,13 +776,14 @@ export async function deleteStory(req, res) {
       return res.status(403).json({ success: false, error: 'Not authorized' });
     }
     try {
-      await getStorage().delete(story.storagePath);
+      if (story.storagePath) await getStorage().delete(story.storagePath);
     } catch {
       // ignore
     }
+    const wasPublished = (story.status || 'published') === 'published';
     await Story.deleteOne({ _id: story._id });
     const io = req.app.get('io');
-    if (io) io.emit('story:deleted', { id });
+    if (io && wasPublished) io.emit('story:deleted', { id });
     res.json({ success: true, data: { id } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

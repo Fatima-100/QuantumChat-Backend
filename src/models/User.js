@@ -17,7 +17,7 @@ const privacySchema = new mongoose.Schema(
     online: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
     onlineStatus: {
       type: String,
-      enum: ['everyone', 'friends', 'selected'],
+      enum: ['everyone', 'friends', 'selected', 'no one '],
       default: 'everyone',
     },
     onlineStatusVisibleTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
@@ -81,6 +81,13 @@ const privacySchema = new mongoose.Schema(
      * chats and profile on their device (strongest on mobile).
      */
     screenshotProtection: { type: Boolean, default: false },
+    /**
+     * When true: (a) this user's story views are recorded anonymously to
+     * everyone else, and (b) as the reciprocal trade-off, this user can no
+     * longer see who viewed their OWN stories — enforced server-side in
+     * storyController.getStoryViewers, never just hidden client-side.
+     */
+    viewStoriesAnonymously: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -93,9 +100,14 @@ const notificationSettingsSchema = new mongoose.Schema(
     },
     statusNotifications: {
       type: String,
-      enum: ['all', 'favorites_only', 'off'],
+      enum: ['all', 'selected', 'off'],
       default: 'all',
     },
+    // Friend ids permitted to notify this user about their story/status
+    // updates — only meaningful when statusNotifications === 'selected'.
+    statusNotificationsSelectedFriends: [
+      { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    ],
     soundEnabled: { type: Boolean, default: true },
     soundVolume: { type: Number, min: 0, max: 100, default: 80 },
     messagePreview: {
@@ -137,6 +149,16 @@ const notificationSettingsSchema = new mongoose.Schema(
       soundOnWeb: { type: Boolean, default: true },
       syncReadAcrossDevices: { type: Boolean, default: true },
     },
+    // Was never declared here despite being read/written throughout the
+    // controller and frontend — Mongoose's default strict mode silently
+    // drops any field not declared in the schema on save, so every
+    // auto-download toggle appeared to work in the UI for a moment but
+    // was never actually persisted.
+    mediaSettings: {
+      autoDownloadImages: { type: Boolean, default: true },
+      autoDownloadVideos: { type: Boolean, default: false },
+      wifiOnly: { type: Boolean, default: true },
+    },
     priority: {
       type: String,
       enum: ['high', 'normal', 'silent'],
@@ -162,6 +184,15 @@ const clearedChatSchema = new mongoose.Schema(
   {
     conversationKey: { type: String, required: true },
     clearedAt: { type: Date, default: Date.now },
+    // Which slice of the conversation this entry hides. 'all' matches the
+    // original single-watermark behavior. Multiple scoped entries can
+    // coexist for the same conversationKey (e.g. photos cleared yesterday,
+    // videos cleared today) — each is applied independently on read.
+    scope: {
+      type: String,
+      enum: ['all', 'photo', 'video', 'voice', 'document', 'text'],
+      default: 'all',
+    },
   },
   { _id: false }
 );
@@ -385,9 +416,33 @@ friends: [
       type: String,
       default: null,
     },
+    // Personal invite link, auto-generated on first save. Used for
+    // "invite a friend" referral tracking — never exposed on other users'
+    // public profiles, only to the account holder (toSelfJSON) and via the
+    // dedicated public preview endpoint by code.
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+    // Set once at signup if a valid referralCode was used. Null for anyone
+    // who joined without one, or whose referrer's code was invalid/expired.
+    referredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
   },
   { timestamps: true }
 );
+
+userSchema.pre('save', function generateReferralCode(next) {
+  if (!this.referralCode) {
+    this.referralCode = crypto.randomBytes(4).toString('hex');
+  }
+  next();
+});
 userSchema.pre('save', async function hashPassword(next) {
   if (!this.isModified('password')) return next();
   if (!this.password) return next();
@@ -457,15 +512,13 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
   const privacy = this.privacy || {};
   const lastSeenSetting = privacy.lastSeen || 'everyone';
   let showLastSeen = false;
-  if (lastSeenSetting === 'everyone') {
+  if (viewerId && String(viewerId) === String(this._id)) {
+    showLastSeen = true;
+  } else if (lastSeenSetting === 'everyone') {
     showLastSeen = true;
   } else if (lastSeenSetting === 'friends' && viewerId) {
-    if (String(viewerId) === String(this._id)) {
-      showLastSeen = true;
-    } else {
-      const friendIds = (this.friends || []).map((f) => String(f._id || f));
-      showLastSeen = friendIds.includes(String(viewerId));
-    }
+    const friendIds = (this.friends || []).map((f) => String(f._id || f));
+    showLastSeen = friendIds.includes(String(viewerId));
   }
 
   const profileVisibilitySetting = privacy.profileVisibility || 'everyone';
@@ -514,14 +567,16 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
     id: this._id,
     username: this.username,
     displayName: this.displayName || '',
-    statusText: this.statusText || '',
+    statusText: showProfileDetails ? (this.statusText || '') : '',
     bio: showProfileDetails ? (this.bio || '') : '',
     phone: showProfileDetails ? (this.phone || '') : '',
-    birthday: (showBirthday && this.birthday) ? this.birthday : null,
+    birthday: (showBirthday && this.dateOfBirth) ? this.dateOfBirth : null,
     publicKeys: publicKeys.map((k) => String(k).toLowerCase()),
     keyRotatedAt: this.keyRotatedAt,
     lastLoginAt: showLastSeen ? this.lastLoginAt : null,
-    hasAvatar: Boolean(this.avatarPath),
+    hasAvatar: showProfileDetails ? Boolean(this.avatarPath) : false,
+      profileLocked: !showProfileDetails,   // ← new
+  birthdayLocked: !showBirthday, 
     privacy: {
       lastSeen: privacy.lastSeen || 'everyone',
       online: privacy.online || 'everyone',
@@ -545,6 +600,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
       whoCanCreateGroupsWithMe: privacy.whoCanCreateGroupsWithMe || 'everyone',
       groupMentions: privacy.groupMentions || 'everyone',
       screenshotProtection: privacy.screenshotProtection === true,
+      viewStoriesAnonymously: privacy.viewStoriesAnonymously === true,
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
@@ -586,8 +642,10 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
     clearedConversations: Array.isArray(this.clearedConversations) ? this.clearedConversations.map((c) => ({
       conversationKey: c.conversationKey,
       clearedAt: c.clearedAt,
+      scope: c.scope || 'all',
     })) : [],
     totpEnabled: Boolean(this.totpEnabled),
+    referralCode: this.referralCode || null,
   };
 };
 

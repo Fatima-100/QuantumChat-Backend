@@ -45,7 +45,6 @@ async function broadcastPresence(io, userId, isOnline, lastLoginAtIso) {
     }
 
     if (setting === 'nobody') return;
-
     const friendIds = (user.friends || []).map((f) => String(f._id || f));
     const showLastSeenEveryone = (privacy.lastSeen || 'everyone') === 'everyone';
 
@@ -62,11 +61,16 @@ async function broadcastPresence(io, userId, isOnline, lastLoginAtIso) {
           io.to(fId).emit('presence:update', { userId, online: isOnline, lastLoginAt: lastLoginAtIso });
         }
       }
+      // Always tell the user's own devices their real last-seen, regardless of setting.
+      if (lastLoginAtIso && !showLastSeenEveryone) {
+        io.to(userId).emit('presence:update', { userId, online: isOnline, lastLoginAt: lastLoginAtIso });
+      }
     } else if (setting === 'friends') {
       const targetIds = new Set([userId, ...friendIds]);
       for (const tId of targetIds) {
-        const isFriend = friendIds.includes(tId) || tId === userId;
-        const showLastSeen = privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
+        const isSelf = tId === userId;
+        const isFriend = friendIds.includes(tId);
+        const showLastSeen = isSelf || privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
         io.to(tId).emit('presence:update', {
           userId,
           online: isOnline,
@@ -77,8 +81,9 @@ async function broadcastPresence(io, userId, isOnline, lastLoginAtIso) {
       const visibleTo = (privacy.onlineStatusVisibleTo || []).map((u) => String(u._id || u));
       const targetIds = new Set([userId, ...visibleTo]);
       for (const tId of targetIds) {
-        const isFriend = friendIds.includes(tId) || tId === userId;
-        const showLastSeen = privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
+        const isSelf = tId === userId;
+        const isFriend = friendIds.includes(tId);
+        const showLastSeen = isSelf || privacy.lastSeen === 'everyone' || (privacy.lastSeen === 'friends' && isFriend);
         io.to(tId).emit('presence:update', {
           userId,
           online: isOnline,
@@ -277,6 +282,91 @@ export function attachSocket(io) {
         };
         io.to(String(msg.from)).emit('message:status', payload);
         io.to(userId).emit('message:status', payload);
+      } catch {
+        // ignore
+      }
+    });
+
+    socket.on('message:read', async ({ messageId, groupId } = {}) => {
+      try {
+        const Message = (await import('../models/Message.js')).default;
+        const now = new Date();
+
+        if (groupId) {
+          const Group = (await import('../models/Group.js')).default;
+          const group = await Group.findById(groupId).select('members');
+          if (!group || !group.isMember(userId)) return;
+
+          const query = messageId
+            ? { _id: messageId, group: groupId, from: { $ne: userId }, 'readBy.user': { $ne: userId } }
+            : { group: groupId, from: { $ne: userId }, 'readBy.user': { $ne: userId } };
+
+          const unread = await Message.find(query).select('_id');
+          const unreadIds = unread.map((m) => m._id);
+          if (!unreadIds.length) return;
+
+          await Promise.all([
+            Message.updateMany(
+              { _id: { $in: unreadIds }, 'deliveredTo.user': { $ne: userId } },
+              { $push: { deliveredTo: { user: userId, at: now } } }
+            ),
+            Message.updateMany(
+              { _id: { $in: unreadIds }, 'readBy.user': { $ne: userId } },
+              { $push: { readBy: { user: userId, at: now } } }
+            ),
+          ]);
+
+          io.to(`group:${String(groupId)}`).emit('message:status', {
+            groupId: String(groupId),
+            userId,
+            messageIds: unreadIds.map(String),
+            deliveredAt: now,
+            readAt: now,
+          });
+          return;
+        }
+
+        if (messageId) {
+          const msg = await Message.findById(messageId);
+          if (!msg) return;
+
+          if (msg.group) {
+            if (String(msg.from) === userId) return;
+            const already = (msg.readBy || []).some((r) => String(r.user) === userId);
+            if (already) return;
+            await Promise.all([
+              Message.updateOne(
+                { _id: msg._id, 'deliveredTo.user': { $ne: userId } },
+                { $push: { deliveredTo: { user: userId, at: now } } }
+              ),
+              Message.updateOne(
+                { _id: msg._id, 'readBy.user': { $ne: userId } },
+                { $push: { readBy: { user: userId, at: now } } }
+              ),
+            ]);
+            io.to(`group:${String(msg.group)}`).emit('message:status', {
+              groupId: String(msg.group),
+              userId,
+              messageIds: [String(msg._id)],
+              deliveredAt: now,
+              readAt: now,
+            });
+            return;
+          }
+
+          if (String(msg.to) !== userId) return;
+          if (msg.readAt) return;
+          msg.deliveredAt = msg.deliveredAt || now;
+          msg.readAt = now;
+          await msg.save();
+          const payload = {
+            id: msg._id.toString(),
+            deliveredAt: msg.deliveredAt,
+            readAt: msg.readAt,
+          };
+          io.to(String(msg.from)).emit('message:status', payload);
+          io.to(userId).emit('message:status', payload);
+        }
       } catch {
         // ignore
       }

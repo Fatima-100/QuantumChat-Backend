@@ -7,7 +7,7 @@ import Message from '../models/Message.js';
 import User from '../models/User.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
 import { notifyUser } from '../services/pushService.js';
-import { clearedAtFor, conversationKey, parseConversationKey } from '../utils/conversationKey.js';
+import { conversationKey, parseConversationKey } from '../utils/conversationKey.js';
 import { notExpiredFilter, resolveExpiresAt } from '../utils/messageExpiry.js';
 import { sealForPublicKey } from '../utils/sealedBox.js';
 import { toObjectId } from '../utils/toObjectId.js';
@@ -96,6 +96,38 @@ function viewOnceAllowedForAttachment(attachment) {
   return Boolean(mediaKindFromAttachment(attachment));
 }
 
+// Maps an attachment to the "Clear chat" category bucket. Any attachment
+// that isn't image/video/audio falls into 'document' (pdf, zip, etc.).
+function attachmentCategory(attachment) {
+  if (!attachment) return undefined;
+  const kind = mediaKindFromAttachment(attachment);
+  if (kind === 'image') return 'photo';
+  if (kind === 'video') return 'video';
+  if (kind === 'audio') return 'voice';
+  return 'document';
+}
+
+// Builds the Mongo condition that matches messages hidden by one scoped
+// clear entry: everything at/before clearedAt, narrowed to the entry's
+// media category (or, for 'text', messages with no attachment at all).
+// 'all' hides everything regardless of category, same as the original
+// single-watermark behavior.
+function scopeCreatedAtCondition(scope, clearedAt) {
+  const base = { createdAt: { $lte: clearedAt } };
+  if (scope === 'all') return base;
+  if (scope === 'text') {
+    // Plain text only — must not treat legacy media (no mediaCategory field)
+    // as text, or a "Text messages" clear would wipe the whole chat.
+    return {
+      ...base,
+      $and: [
+        { $or: [{ attachment: { $exists: false } }, { attachment: null }] },
+        { $or: [{ mediaCategory: { $exists: false } }, { mediaCategory: null }] },
+      ],
+    };
+  }
+  return { ...base, mediaCategory: scope };
+}
 function toClientMessage(doc) {
   const message = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
   message.id = message._id;
@@ -140,6 +172,18 @@ function toClientMessage(doc) {
         ? h.envelopes.map((e) => ({ ...e, user: e.user?.toString?.() || String(e.user) }))
         : undefined,
       editedAt: h.editedAt,
+    }));
+  }
+  if (Array.isArray(message.deliveredTo)) {
+    message.deliveredTo = message.deliveredTo.map((d) => ({
+      user: d.user?.toString?.() || String(d.user),
+      at: d.at,
+    }));
+  }
+  if (Array.isArray(message.readBy)) {
+    message.readBy = message.readBy.map((r) => ({
+      user: r.user?.toString?.() || String(r.user),
+      at: r.at,
     }));
   }
   if (message.viewOnceOpenedBy) {
@@ -389,29 +433,22 @@ export async function sendMessage(req, res) {
     const replyToId = await assertReplyAllowed(req, replyTo, { to: toOid });
     const forwardMeta = await assertForwardAllowed(req, forwardedFrom);
     const forwardPolicy = parseForwardPolicy(forwardPolicyRaw);
+    let attachmentDoc = null;
+    if (attachmentId) {
+      attachmentDoc = await Attachment.findById(toObjectId(attachmentId)).select('mimetype filename');
+    }
+    const mediaCategory = attachmentCategory(attachmentDoc);
 
     let viewOnce = viewOnceRaw === true;
     let viewOnceMediaKind = null;
     if (viewOnce) {
-      const viewOnceAttachmentOid = toObjectId(attachmentId);
-      if (!viewOnceAttachmentOid) {
+      if (!attachmentDoc || !viewOnceAllowedForAttachment(attachmentDoc)) {
         return res.status(400).json({
           success: false,
           error: 'View once is only available for photo, video, or voice attachments',
         });
       }
-      const attachment = await Attachment.findById(viewOnceAttachmentOid);
-      if (!attachment || !viewOnceAllowedForAttachment(attachment)) {
-        return res.status(400).json({
-          success: false,
-          error: 'View once is only available for photo, video, or voice attachments',
-        });
-      }
-      viewOnceMediaKind = mediaKindFromAttachment(attachment);
-      // View-once media must not be forwarded further.
-      if (!forwardPolicy) {
-        // force allowForward false via create fields below
-      }
+      viewOnceMediaKind = mediaKindFromAttachment(attachmentDoc);
     }
 
     // Vault decoy: if I have this recipient vaulted and my vault is
@@ -427,6 +464,7 @@ export async function sendMessage(req, res) {
       forRecipient: normalizeEnvelope(forRecipient),
       forSender: normalizeEnvelope(forSender),
       attachment: attachmentId || undefined,
+      mediaCategory,
       replyTo: replyToId,
       kind: kind === 'ai_note' ? 'ai_note' : 'text',
       expiresAt: expiresAt || undefined,
@@ -583,15 +621,15 @@ export async function getConversation(req, res) {
       filter.$and.push({ createdAt: { $lt: before } });
     }
 
-    // "Clear chat" watermark: hide messages this user cleared (those created at
-    // or before the clear moment). Per-user only — the peer's view is untouched,
-    // and new messages after the clear appear normally.
-    const dmClearedAt = clearedAtFor(
-      req.user.clearedConversations,
-      conversationKey({ from: req.user._id, to: peerOid })
-    );
-    if (dmClearedAt) {
-      filter.$and.push({ createdAt: { $gt: dmClearedAt } });
+    // "Clear chat" watermarks: hide messages this user cleared, scoped by
+    // media category (or all). Per-user only — the peer's view is untouched,
+    // and new messages after each scope's clear moment still appear normally.
+    const dmKey = conversationKey({ from: req.user._id, to: peerOid });
+    const dmClearExclusions = (req.user.clearedConversations || [])
+      .filter((c) => c.conversationKey === dmKey && c.clearedAt)
+      .map((c) => scopeCreatedAtCondition(c.scope || 'all', new Date(c.clearedAt)));
+    if (dmClearExclusions.length) {
+      filter.$and.push({ $nor: dmClearExclusions });
     }
 
     const rows = await Message.find(filter)
@@ -742,9 +780,10 @@ export async function syncMessages(req, res) {
       if (!clearedAt) continue;
       const parts = parseConversationKey(entry.conversationKey);
       if (!parts) continue;
+      const scopeCond = scopeCreatedAtCondition(entry.scope || 'all', clearedAt);
       if (parts.group) {
         const gid = toObjectId(parts.group);
-        if (gid) clearExclusions.push({ group: gid, createdAt: { $lte: clearedAt } });
+        if (gid) clearExclusions.push({ group: gid, ...scopeCond });
       } else if (parts.dm) {
         const peerRaw = parts.dm.find((id) => String(id) !== String(myId)) || parts.dm[0];
         const peerOid = toObjectId(peerRaw);
@@ -754,7 +793,7 @@ export async function syncMessages(req, res) {
               { from: myId, to: peerOid },
               { from: peerOid, to: myId },
             ],
-            createdAt: { $lte: clearedAt },
+            ...scopeCond,
           });
         }
       }
@@ -1020,6 +1059,36 @@ export async function reactToMessage(req, res) {
       emitToParticipants(io, message, 'message:reaction', payload);
     }
 
+     if (!clear) {
+      const reactorId = req.user._id.toString();
+      if (groupMemberIds) {
+        for (const memberId of groupMemberIds) {
+          if (memberId === reactorId) continue;
+          notifyUser(memberId, {
+            title: 'QuantumChat',
+            body: 'New reaction',
+            kind: 'reaction',
+            conversationKey: `group:${message.group}`,
+            url: `/chat/g/${message.group}`,
+            data: { messageId: message._id.toString(), fromUserId: reactorId },
+          }).catch(() => {});
+        }
+      } else {
+        const otherPartyId =
+          message.from.toString() === reactorId ? message.to?.toString() : message.from.toString();
+        if (otherPartyId && otherPartyId !== reactorId) {
+          notifyUser(otherPartyId, {
+            title: 'QuantumChat',
+            body: 'New reaction',
+            kind: 'reaction',
+            conversationKey: conversationKey({ from: message.from, to: message.to }),
+            url: `/chat/${reactorId}`,
+            data: { messageId: message._id.toString(), fromUserId: reactorId },
+          }).catch(() => {});
+        }
+      }
+    }
+
     res.json({ success: true, data: payload });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -1129,7 +1198,10 @@ export async function getMessageInfo(req, res) {
     }
 
     if (message.group) {
-      const group = await Group.findById(message.group).populate('members', 'username avatarPath');
+      const group = await Group.findById(message.group).populate(
+        'members',
+        'username displayName transliteratedNames avatarPath'
+      );
       if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
 
       const deliveredMap = new Map((message.deliveredTo || []).map((d) => [String(d.user), d.at]));
@@ -1140,6 +1212,8 @@ export async function getMessageInfo(req, res) {
         .map((m) => ({
           userId: String(m._id),
           username: m.username,
+          displayName: m.displayName || '',
+          transliteratedNames: m.transliteratedNames || null,
           hasAvatar: Boolean(m.avatarPath),
           deliveredAt: deliveredMap.get(String(m._id)) || null,
           readAt: readMap.get(String(m._id)) || null,
@@ -1151,7 +1225,7 @@ export async function getMessageInfo(req, res) {
           id: message._id.toString(),
           isGroup: true,
           totalRecipients: members.length,
-          deliveredCount: members.filter((m) => m.deliveredAt).length,
+          deliveredCount: members.filter((m) => m.deliveredAt || m.readAt).length,
           readCount: members.filter((m) => m.readAt).length,
           members,
         },

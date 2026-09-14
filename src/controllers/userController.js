@@ -4,16 +4,17 @@ import FriendRequest from '../models/FriendRequest.js';
 import Group from '../models/Group.js';
 import Message from '../models/Message.js';
 import User, { KEY_SET_SIZE } from '../models/User.js';
+import { generateTransliteratedNames } from '../services/transliterationService.js';
 import { conversationKey } from '../utils/conversationKey.js';
+import { appBaseUrl } from '../utils/mail.js';
 import { normalizeNotificationSettings } from '../utils/notificationSettings.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
 import { toObjectId } from '../utils/toObjectId.js';
-import { generateTransliteratedNames } from '../services/transliterationService.js';
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 
 const PUBLIC_FIELDS =
-  'username displayName statusText bio phone birthday email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy preferredLanguage transliteratedNames emailVerified isSystemUser systemRole verified';
+  'username displayName statusText bio phone dateOfBirth email publicKeys keyRotatedAt lastLoginAt blockedUsers friends avatarPath avatarMimeType privacy preferredLanguage transliteratedNames emailVerified isSystemUser systemRole verified';
 
 
 export async function areUsersBlocked(userAId, userBId, aBlockedUsersHint) {
@@ -70,7 +71,7 @@ export async function listUsers(req, res) {
           friendIds.has(String(u._id)) ||
           (u.privacy?.discoverable || 'everyone') !== 'nobody',
       )
-      .map((u) => u.toPublicJSON());
+      .map((u) => u.toPublicJSON(req.user._id));
 
     res.json({
       success: true,
@@ -114,7 +115,7 @@ export async function getUser(req, res) {
 
 export async function updatePrivacy(req, res) {
   try {
-    const {
+     const {
       lastSeen,
       readReceipts,
       onlineStatus,
@@ -132,6 +133,7 @@ export async function updatePrivacy(req, res) {
       whoCanCreateGroupsWithMe,
       groupMentions,
       screenshotProtection,
+      viewStoriesAnonymously,
     } = req.body || {};
 
     if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
@@ -149,6 +151,9 @@ export async function updatePrivacy(req, res) {
     }
     if (screenshotProtection !== undefined && typeof screenshotProtection !== 'boolean') {
       return res.status(400).json({ success: false, error: 'Invalid screenshotProtection privacy setting' });
+    }
+    if (viewStoriesAnonymously !== undefined && typeof viewStoriesAnonymously !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Invalid viewStoriesAnonymously privacy setting' });
     }
     if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
       return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
@@ -382,6 +387,10 @@ function applyPrivacyPatch(user, privacy) {
     user.privacy.screenshotProtection = privacy.screenshotProtection;
   }
 
+  if (typeof privacy.viewStoriesAnonymously === 'boolean') {
+    user.privacy.viewStoriesAnonymously = privacy.viewStoriesAnonymously;
+  }
+
   if (onlineStatusOk.includes(privacy.onlineStatus)) {
     user.privacy.onlineStatus = privacy.onlineStatus;
     // Presence still broadcasts; consumers should honor onlineStatus / visibleTo.
@@ -464,7 +473,7 @@ export async function updateNotificationSettings(req, res) {
 
     const enums = {
       messageNotifications: ['all', 'direct_only', 'all_except_reactions'],
-      statusNotifications: ['all', 'favorites_only', 'off'],
+      statusNotifications: ['all', 'selected', 'off'],
       messagePreview: ['full', 'sender_only', 'hidden'],
       vibration: ['on', 'off', 'custom'],
       groupNotifications: ['all', 'mentions_only', 'important_only', 'off'],
@@ -476,6 +485,15 @@ export async function updateNotificationSettings(req, res) {
       if (settings[key] != null && allowed.includes(settings[key])) {
         user.notificationSettings[key] = settings[key];
       }
+    }
+
+    if (Array.isArray(settings.statusNotificationsSelectedFriends)) {
+      const friendSet = new Set((user.friends || []).map((id) => String(id)));
+      // Mongoose auto-casts valid ObjectId strings assigned to a
+      // schema-typed array, so no manual ObjectId conversion is needed here.
+      user.notificationSettings.statusNotificationsSelectedFriends = settings.statusNotificationsSelectedFriends
+        .map((id) => String(id))
+        .filter((id) => friendSet.has(id));
     }
 
     if (typeof settings.soundEnabled === 'boolean') {
@@ -615,14 +633,23 @@ export async function unmuteChat(req, res) {
  * The conversation, contact, and group all stay in the list; sending new
  * messages afterwards works normally. E2E ciphertext is untouched.
  */
+const CLEAR_SCOPES = ['all', 'photo', 'video', 'voice', 'document', 'text'];
+
 export async function clearConversation(req, res) {
   try {
-    const { peerId, groupId } = req.body || {};
+    const { peerId, groupId, scopes: scopesRaw } = req.body || {};
     if (!peerId && !groupId) {
       return res.status(400).json({ success: false, error: 'peerId or groupId is required' });
     }
     if (peerId && groupId) {
       return res.status(400).json({ success: false, error: 'Provide either peerId or groupId, not both' });
+    }
+
+    const scopes = Array.isArray(scopesRaw) && scopesRaw.length
+      ? [...new Set(scopesRaw.map(String))]
+      : ['all'];
+    if (scopes.some((s) => !CLEAR_SCOPES.includes(s))) {
+      return res.status(400).json({ success: false, error: 'Invalid clear scope' });
     }
 
     // For a group clear, confirm the caller is actually a member before we
@@ -648,8 +675,35 @@ export async function clearConversation(req, res) {
     const clearedAt = new Date();
 
     const user = req.user;
-    user.clearedConversations = (user.clearedConversations || []).filter((c) => c.conversationKey !== key);
-    user.clearedConversations.push({ conversationKey: key, clearedAt });
+    const already = user.clearedConversations || [];
+    // 'all' supersedes every other scope for this conversation — once
+    // everything is cleared, per-category watermarks for the same key are
+    // redundant and would only complicate later reads.
+    let nextList;
+    if (scopes.includes('all')) {
+      nextList = [
+        ...already.filter((c) => c.conversationKey !== key),
+        { conversationKey: key, scope: 'all', clearedAt },
+      ];
+    } else {
+      nextList = [
+        ...already.filter((c) => {
+          if (c.conversationKey !== key) return true;
+          // Entries with no `scope` field at all predate this feature and
+          // would otherwise be silently read as an 'all' clear forever
+          // (via the `c.scope || 'all'` fallback on the read side). Always
+          // drop them here — a scoped clear request replaces that stale,
+          // ambiguous watermark with the specific scope(s) actually asked
+          // for now. Legitimate scoped/'all' entries created *after* this
+          // feature shipped always have an explicit scope and are left
+          // alone unless the new request targets that same scope.
+          if (c.scope == null) return false;
+          return !scopes.includes(c.scope);
+        }),
+        ...scopes.map((scope) => ({ conversationKey: key, scope, clearedAt })),
+      ];
+    }
+    user.clearedConversations = nextList;
     await user.save();
 
     // Sync the clear across the user's own devices so a second logged-in
@@ -661,6 +715,7 @@ export async function clearConversation(req, res) {
         conversationKey: key,
         peerId: peerId ? String(peerId) : null,
         groupId: groupId ? String(groupId) : null,
+        scopes,
         clearedAt,
       });
     }
@@ -670,6 +725,76 @@ export async function clearConversation(req, res) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
+
+/**
+ * Undo a recent "clear chat" by restoring the previous watermark entries for
+ * this conversation. The client sends the snapshot taken right before clear.
+ * Empty restoreEntries means "no clear watermark for this chat" (full undo).
+ */
+export async function undoClearConversation(req, res) {
+  try {
+    const { peerId, groupId, restoreEntries: restoreRaw } = req.body || {};
+    if (!peerId && !groupId) {
+      return res.status(400).json({ success: false, error: 'peerId or groupId is required' });
+    }
+    if (peerId && groupId) {
+      return res.status(400).json({ success: false, error: 'Provide either peerId or groupId, not both' });
+    }
+
+    if (groupId) {
+      const gid = toObjectId(groupId);
+      if (!gid) return res.status(400).json({ success: false, error: 'Invalid group id' });
+      const group = await Group.findById(gid).select('members');
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      if (!group.isMember(req.user._id)) {
+        return res.status(403).json({ success: false, error: 'Not a group member' });
+      }
+    } else {
+      const pid = toObjectId(peerId);
+      if (!pid) return res.status(400).json({ success: false, error: 'Invalid user id' });
+    }
+
+    const key = conversationKey(
+      groupId ? { group: groupId } : { from: req.user._id, to: peerId }
+    );
+
+    const restoreEntries = Array.isArray(restoreRaw) ? restoreRaw : [];
+    const normalized = [];
+    for (const entry of restoreEntries) {
+      if (!entry || typeof entry !== 'object') continue;
+      // Only accept entries for this conversation — never let a client
+      // rewrite watermarks for unrelated chats.
+      if (String(entry.conversationKey || '') !== key) continue;
+      const scope = String(entry.scope || 'all');
+      if (!CLEAR_SCOPES.includes(scope)) continue;
+      const clearedAt = entry.clearedAt ? new Date(entry.clearedAt) : null;
+      if (!clearedAt || Number.isNaN(clearedAt.getTime())) continue;
+      normalized.push({ conversationKey: key, scope, clearedAt });
+    }
+
+    const user = req.user;
+    const already = user.clearedConversations || [];
+    user.clearedConversations = [
+      ...already.filter((c) => c.conversationKey !== key),
+      ...normalized,
+    ];
+    await user.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(String(user._id)).emit('chat:clear-undone', {
+        conversationKey: key,
+        peerId: peerId ? String(peerId) : null,
+        groupId: groupId ? String(groupId) : null,
+      });
+    }
+
+    res.json({ success: true, data: user.toSelfJSON() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 export async function listBlockedUsers(req, res) {
   try {
     const me = await User.findById(req.user._id).populate('blockedUsers', 'username displayName avatarPath');
@@ -1091,11 +1216,11 @@ async function acceptFriendRequestRecord(request, req) {
   const io = req.app.get('io');
   io?.to(String(request.from)).emit('friend:request:accepted', {
     id: request._id,
-    friend: toUser.toPublicJSON(),
+    friend: toUser.toPublicJSON(request.from),
   });
   io?.to(String(request.to)).emit('friend:request:accepted', {
     id: request._id,
-    friend: fromUser.toPublicJSON(),
+    friend: fromUser.toPublicJSON(request.to),
   });
 }
 
@@ -1289,6 +1414,33 @@ export async function updateLanguage(req, res) {
     req.user.preferredLanguage = lang;
     await req.user.save();
     res.json({ success: true, data: req.user.toSelfJSON() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** My invite link plus the list of people who joined using it. */
+export async function getMyReferrals(req, res) {
+  try {
+    const referredUsers = await User.find({ referredBy: req.user._id })
+      .select('username displayName avatarPath createdAt')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: {
+        referralCode: req.user.referralCode,
+        referralLink: `${appBaseUrl()}/register?ref=${req.user.referralCode}`,
+        invitedCount: referredUsers.length,
+        invitedUsers: referredUsers.map((u) => ({
+          id: u._id,
+          username: u.username,
+          displayName: u.displayName || '',
+          hasAvatar: Boolean(u.avatarPath),
+          joinedAt: u.createdAt,
+        })),
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

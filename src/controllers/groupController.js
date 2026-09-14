@@ -1,22 +1,22 @@
 import crypto from 'crypto';
 import mongoose from 'mongoose';
+import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
 import Group from '../models/Group.js';
 import GroupJoinRequest from '../models/GroupJoinRequest.js';
-import User from '../models/User.js';
 import Message from '../models/Message.js';
-import { getStorage, newObjectName, safeImageContentType } from '../middleware/upload.js';
-import { sealForPublicKey } from '../utils/sealedBox.js';
-import { notifyUser } from '../services/pushService.js';
+import User from '../models/User.js';
 import { incrementCiphertextsRelayed } from '../services/blindnessStats.js';
-import { resolveExpiresAt, notExpiredFilter } from '../utils/messageExpiry.js';
+import { notifyUser } from '../services/pushService.js';
+import { notExpiredFilter, resolveExpiresAt } from '../utils/messageExpiry.js';
+import { sealForPublicKey } from '../utils/sealedBox.js';
 import { toObjectId } from '../utils/toObjectId.js';
-import { clearedAtFor } from '../utils/conversationKey.js';
+
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 const ATTACHMENT_POPULATE =
   'filename mimetype size nonce ephemeralPublicKey targetPublicKey forSenderNonce forSenderEphemeralPublicKey forSenderTargetPublicKey encryption secretboxNonce group';
 const MEMBER_POPULATE =
-  'username email publicKeys lastLoginAt keyRotatedAt avatarPath isSystemUser systemRole verified';
+  'username email publicKeys lastLoginAt keyRotatedAt avatarPath isSystemUser systemRole verified privacy friends';
 
 function validateEnvelope(envelope) {
   return (
@@ -88,11 +88,36 @@ function toClientMessage(doc) {
   return message;
 }
 
+function allowsReadReceipts(privacy) {
+  const value = privacy?.readReceipts;
+  if (value === false || value === 'nobody') return false;
+  return true;
+}
+
 function emitToMembers(io, memberIds, event, payload) {
   if (!io) return;
   for (const id of memberIds) {
     io.to(String(id)).emit(event, payload);
   }
+}
+
+// Same rule as messageController.js's version — hides messages at/before
+// clearedAt, narrowed to a media category (or, for 'text', no attachment).
+function scopeCreatedAtCondition(scope, clearedAt) {
+  const base = { createdAt: { $lte: clearedAt } };
+  if (scope === 'all') return base;
+  if (scope === 'text') {
+    // Plain text only — must not treat legacy media (no mediaCategory field)
+    // as text, or a "Text messages" clear would wipe the whole chat.
+    return {
+      ...base,
+      $and: [
+        { $or: [{ attachment: { $exists: false } }, { attachment: null }] },
+        { $or: [{ mediaCategory: { $exists: false } }, { mediaCategory: null }] },
+      ],
+    };
+  }
+  return { ...base, mediaCategory: scope };
 }
 
 async function loadGroup(id) {
@@ -130,21 +155,26 @@ export async function createGroup(req, res) {
     }
 
     if (uniqueIds.length) {
-      const found = await User.find({ _id: { $in: uniqueIds } }).select('_id privacy friends');
+      const found = await User.find({ _id: { $in: uniqueIds } }).select('_id username privacy friends');
       if (found.length !== uniqueIds.length) {
         return res.status(400).json({ success: false, error: 'One or more members were not found' });
       }
+      const blocked = [];
       for (const targetUser of found) {
         const createPolicy = targetUser.privacy?.whoCanCreateGroupsWithMe || 'everyone';
         if (createPolicy === 'friends') {
           const isFriend = (targetUser.friends || []).some((f) => String(f) === String(req.user._id));
           if (!isFriend) {
-            return res.status(403).json({
-              success: false,
-              error: 'One or more users do not accept group creation from non-friends',
-            });
+            blocked.push({ id: String(targetUser._id), username: targetUser.username, reason: 'friends_only' });
           }
         }
+      }
+      if (blocked.length) {
+        return res.status(403).json({
+          success: false,
+          error: `${blocked.map((b) => b.username).join(', ')} only ${blocked.length === 1 ? 'lets' : 'let'} friends add them to new groups`,
+          blockedUsers: blocked,
+        });
       }
     }
 
@@ -736,27 +766,30 @@ export async function addMembers(req, res) {
     if (toAdd.length === 0) {
       return res.status(400).json({ success: false, error: 'No new members to add' });
     }
-    const found = await User.find({ _id: { $in: toAdd } }).select('_id privacy friends');
+    const found = await User.find({ _id: { $in: toAdd } }).select('_id username privacy friends');
     if (found.length !== toAdd.length) {
       return res.status(400).json({ success: false, error: 'One or more members were not found' });
     }
+    const blocked = [];
     for (const targetUser of found) {
       const addPolicy = targetUser.privacy?.whoCanAddToGroups || 'everyone';
       if (addPolicy === 'nobody') {
-        return res.status(403).json({
-          success: false,
-          error: 'One or more users do not accept group invites',
-        });
+        blocked.push({ id: String(targetUser._id), username: targetUser.username, reason: 'nobody' });
+        continue;
       }
       if (addPolicy === 'friends') {
         const isFriend = (targetUser.friends || []).some((f) => String(f) === String(req.user._id));
         if (!isFriend) {
-          return res.status(403).json({
-            success: false,
-            error: 'One or more users only allow friends to add them to groups',
-          });
+          blocked.push({ id: String(targetUser._id), username: targetUser.username, reason: 'friends_only' });
         }
       }
+    }
+    if (blocked.length) {
+      return res.status(403).json({
+        success: false,
+        error: `${blocked.map((b) => b.username).join(', ')} can't be added directly — share the group's invite link instead`,
+        blockedUsers: blocked,
+      });
     }
     group.members.push(...toAdd);
     await group.save();
@@ -1076,7 +1109,15 @@ export async function sendGroupMessage(req, res) {
       const senderIsAdmin = group.isAdmin(req.user._id);
       const mentionedUsers = await User.find({ _id: { $in: initialMentions } }).select('privacy friends');
       for (const targetUser of mentionedUsers) {
-        const groupPolicy = targetUser.privacy?.groupMentions || 'everyone';
+        const rawPolicy = String(targetUser.privacy?.groupMentions || 'everyone')
+          .toLowerCase()
+          .replace(/[\s_-]+/g, '');
+        const groupPolicy =
+          rawPolicy === 'noone' || rawPolicy === 'nobody' || rawPolicy === 'none'
+            ? 'nobody'
+            : rawPolicy === 'adminsonly' || rawPolicy === 'admins'
+            ? 'adminsOnly'
+            : 'everyone';
         if (groupPolicy === 'nobody') continue;
         if (groupPolicy === 'adminsOnly' && !senderIsAdmin) continue;
 
@@ -1107,32 +1148,33 @@ export async function sendGroupMessage(req, res) {
       forwardPolicy = { allowForward, ...(forwardUntil ? { forwardUntil } : {}) };
     }
 
+    let mediaCategory;
+    if (attachmentId) {
+      const Attachment = (await import('../models/Attachment.js')).default;
+      const attachmentDoc = await Attachment.findById(toObjectId(attachmentId)).select('mimetype filename');
+      const mime = String(attachmentDoc?.mimetype || '').toLowerCase();
+      const name = String(attachmentDoc?.filename || '').toLowerCase();
+      if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
+        mediaCategory = 'voice';
+      } else if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) {
+        mediaCategory = 'photo';
+      } else if (mime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) {
+        mediaCategory = 'video';
+      } else {
+        mediaCategory = 'document';
+      }
+    }
+
     let viewOnce = viewOnceRaw === true;
     let viewOnceMediaKind;
     if (viewOnce) {
-      const viewOnceAttachmentOid = toObjectId(attachmentId);
-      if (!viewOnceAttachmentOid) {
+      if (!attachmentId || !['photo', 'video', 'voice'].includes(mediaCategory)) {
         return res.status(400).json({
           success: false,
           error: 'View once is only available for photo, video, or voice attachments',
         });
       }
-      const Attachment = (await import('../models/Attachment.js')).default;
-      const attachment = await Attachment.findById(viewOnceAttachmentOid);
-      const mime = String(attachment?.mimetype || '').toLowerCase();
-      const name = String(attachment?.filename || '').toLowerCase();
-      if (mime.startsWith('audio/') || /\.(webm|ogg|mp3|m4a|wav|aac)$/i.test(name) || /^voice-note/i.test(name)) {
-        viewOnceMediaKind = 'audio';
-      } else if (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name)) {
-        viewOnceMediaKind = 'image';
-      } else if (mime.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi)$/i.test(name)) {
-        viewOnceMediaKind = 'video';
-      } else {
-        return res.status(400).json({
-          success: false,
-          error: 'View once is only available for photo, video, or voice attachments',
-        });
-      }
+      viewOnceMediaKind = mediaCategory === 'photo' ? 'image' : mediaCategory === 'voice' ? 'audio' : 'video';
       forwardPolicy = { allowForward: false };
     }
 
@@ -1141,6 +1183,7 @@ export async function sendGroupMessage(req, res) {
       group: group._id,
       ...(isPublic ? { content } : { envelopes: normalized }),
       attachment: attachmentId || undefined,
+      mediaCategory,
       replyTo: replyToId,
       kind: messageKind,
       mentionedUserIds: mentions,
@@ -1167,15 +1210,21 @@ export async function sendGroupMessage(req, res) {
         io?.to(mid).emit('mention:new', { groupId, messageId: payload.id, from: String(req.user._id) });
       }
     }
-
     const senderId = String(req.user._id);
+    const mentionedSet = new Set(mentions.map(String));
     for (const mid of memberSet) {
       if (mid === senderId) continue;
+      const isMention = mentionedSet.has(mid);
       notifyUser(mid, {
-        title: 'QuantumChat',
-        body: isPublic ? 'New public group message' : 'New group message',
+        title: isMention ? `${req.user.username} mentioned you` : 'QuantumChat',
+        body: isMention
+          ? `You were mentioned in ${group.name}`
+          : isPublic
+            ? 'New public group message'
+            : 'New group message',
         kind: 'group',
-        isMention: mentions.map(String).includes(String(mid)),
+        isMention,
+        isAnnouncement: messageKind === 'announcement',   // NEW
         conversationKey: `group:${groupId}`,
         url: `/chat/g/${groupId}`,
       }).catch(() => {});
@@ -1318,12 +1367,16 @@ export async function getGroupMessages(req, res) {
       filter.$and.push({ createdAt: { $lt: before } });
     }
 
-    // "Clear chat" watermark: hide messages this member cleared for themselves
-    // (created at or before the clear moment). Per-user only — other members'
-    // views and the group itself are untouched, and new messages still appear.
-    const groupClearedAt = clearedAtFor(req.user.clearedConversations, `group:${groupOid}`);
-    if (groupClearedAt) {
-      filter.$and.push({ createdAt: { $gt: groupClearedAt } });
+    // "Clear chat" watermarks: hide messages this member cleared for
+    // themselves, scoped by media category (or all). Per-user only — other
+    // members' views and the group itself are untouched, and new messages
+    // after each scope's clear moment still appear normally.
+    const groupClearKey = `group:${groupOid}`;
+    const groupClearExclusions = (req.user.clearedConversations || [])
+      .filter((c) => c.conversationKey === groupClearKey && c.clearedAt)
+      .map((c) => scopeCreatedAtCondition(c.scope || 'all', new Date(c.clearedAt)));
+    if (groupClearExclusions.length) {
+      filter.$and.push({ $nor: groupClearExclusions });
     }
 
     const rows = await Message.find(filter)
@@ -1336,8 +1389,11 @@ export async function getGroupMessages(req, res) {
     const page = hasMore ? rows.slice(0, limit) : rows;
     page.reverse();
 
+    const markRead = req.query.markRead === '1' || req.query.markRead === 'true' || req.query.markRead === true;
+    const allowReadReceipts = allowsReadReceipts(req.user.privacy);
     const now = new Date();
     const uid = req.user._id;
+
     const undeliveredIds = page
       .filter(
         (msg) =>
@@ -1346,22 +1402,75 @@ export async function getGroupMessages(req, res) {
       )
       .map((msg) => msg._id);
 
-    if (undeliveredIds.length) {
-      await Message.updateMany(
-        { _id: { $in: undeliveredIds }, 'deliveredTo.user': { $ne: uid } },
-        { $push: { deliveredTo: { user: uid, at: now } } }
-      );
+    const unreadIds = (markRead && allowReadReceipts)
+      ? page
+          .filter(
+            (msg) =>
+              String(msg.from) !== String(uid) &&
+              !(msg.readBy || []).some((r) => String(r.user) === String(uid))
+          )
+          .map((msg) => msg._id)
+      : [];
+
+    if (undeliveredIds.length || unreadIds.length) {
+      const ops = [];
+      if (undeliveredIds.length) {
+        ops.push(
+          Message.updateMany(
+            { _id: { $in: undeliveredIds }, 'deliveredTo.user': { $ne: uid } },
+            { $push: { deliveredTo: { user: uid, at: now } } }
+          )
+        );
+      }
+      if (unreadIds.length) {
+        ops.push(
+          Message.updateMany(
+            { _id: { $in: unreadIds }, 'readBy.user': { $ne: uid } },
+            { $push: { readBy: { user: uid, at: now } } }
+          ),
+          Message.updateMany(
+            { _id: { $in: unreadIds }, 'deliveredTo.user': { $ne: uid } },
+            { $push: { deliveredTo: { user: uid, at: now } } }
+          )
+        );
+      }
+      await Promise.all(ops);
+
       for (const msg of page) {
         if (undeliveredIds.some((id) => String(id) === String(msg._id))) {
           msg.deliveredTo = [...(msg.deliveredTo || []), { user: uid, at: now }];
         }
+        if (unreadIds.some((id) => String(id) === String(msg._id))) {
+          msg.readBy = [...(msg.readBy || []), { user: uid, at: now }];
+          if (!(msg.deliveredTo || []).some((d) => String(d.user) === String(uid))) {
+            msg.deliveredTo = [...(msg.deliveredTo || []), { user: uid, at: now }];
+          }
+        }
       }
-      req.app.get('io')?.to(`group:${groupOid}`).emit('message:status', {
-        groupId: String(groupOid),
-        userId: String(uid),
-        messageIds: undeliveredIds.map(String),
-        deliveredAt: now,
-      });
+
+      const io = req.app.get('io');
+      if (io) {
+        if (unreadIds.length) {
+          io.to(`group:${groupOid}`).emit('message:status', {
+            groupId: String(groupOid),
+            userId: String(uid),
+            messageIds: unreadIds.map(String),
+            deliveredAt: now,
+            readAt: now,
+          });
+        }
+        const deliveredOnlyIds = undeliveredIds.filter(
+          (id) => !unreadIds.some((uid2) => String(uid2) === String(id))
+        );
+        if (deliveredOnlyIds.length) {
+          io.to(`group:${groupOid}`).emit('message:status', {
+            groupId: String(groupOid),
+            userId: String(uid),
+            messageIds: deliveredOnlyIds.map(String),
+            deliveredAt: now,
+          });
+        }
+      }
     }
 
     res.json({
@@ -1390,6 +1499,10 @@ export async function markGroupMessagesRead(req, res) {
       return res.status(403).json({ success: false, error: 'Not a group member' });
     }
 
+    if (!allowsReadReceipts(req.user.privacy)) {
+      return res.json({ success: true, data: { updated: 0 } });
+    }
+
     const uid = req.user._id;
     const now = new Date();
 
@@ -1403,14 +1516,16 @@ export async function markGroupMessagesRead(req, res) {
       return res.json({ success: true, data: { updated: 0 } });
     }
 
-    await Message.updateMany(
-      { _id: { $in: unreadIds }, 'deliveredTo.user': { $ne: uid } },
-      { $push: { deliveredTo: { user: uid, at: now } } }
-    );
-    await Message.updateMany(
-      { _id: { $in: unreadIds }, 'readBy.user': { $ne: uid } },
-      { $push: { readBy: { user: uid, at: now } } }
-    );
+    await Promise.all([
+      Message.updateMany(
+        { _id: { $in: unreadIds }, 'deliveredTo.user': { $ne: uid } },
+        { $push: { deliveredTo: { user: uid, at: now } } }
+      ),
+      Message.updateMany(
+        { _id: { $in: unreadIds }, 'readBy.user': { $ne: uid } },
+        { $push: { readBy: { user: uid, at: now } } }
+      ),
+    ]);
 
     req.app.get('io')?.to(`group:${groupOid}`).emit('message:status', {
       groupId: String(groupOid),

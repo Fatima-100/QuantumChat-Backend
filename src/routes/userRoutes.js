@@ -25,11 +25,13 @@ import {
   removeFriend,
   getMe,
   getMyPublicKeys,
+  getMyReferrals,
   getNotificationSettings,
   updateNotificationSettings,
   muteChat,
   unmuteChat,
   clearConversation,
+  undoClearConversation,
 } from '../controllers/userController.js';
 import {
   getPushVapidPublicKey,
@@ -78,6 +80,7 @@ router.put('/me/notification-settings', updateNotificationSettings);
 router.post('/me/mute', muteChat);
 router.post('/me/unmute', unmuteChat);
 router.post('/me/clear-chat', clearConversation);
+router.post('/me/clear-chat/undo', undoClearConversation);
 router.get('/me/blocked', listBlockedUsers);
 router.get('/me/export', exportAccountData);
 router.delete('/me', deleteAccount);
@@ -89,6 +92,7 @@ router.post('/me/sessions/link/approve', approveLinkRequest);
 router.post('/me/sessions/link/reject', rejectLinkRequest);
 router.post('/me/sessions/link/email', sendLinkEmail);
 router.delete('/me/sessions/:sessionId', revokeSession);
+router.get('/me/referrals', getMyReferrals);
 router.get('/me/vault', getVault);
 router.put('/me/vault', putVault);
 router.delete('/me/vault', deleteVault);
