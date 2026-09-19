@@ -533,7 +533,7 @@ export async function sendMessage(req, res) {
     if (!isSelfChat && !isCapsule) {
       notifyUser(toOid, {
         title: 'QuantumChat',
-        body,
+        body: 'New message',
         kind: 'dm',
         conversationKey: conversationKey({ from: req.user._id, to: toOid }),
         url: `/chat/${req.user._id}`,
