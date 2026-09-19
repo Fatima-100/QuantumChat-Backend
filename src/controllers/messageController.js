@@ -369,6 +369,7 @@ export async function sendMessage(req, res) {
   try {
     const {
       to,
+      clientMessageId,
       forRecipient,
       forSender,
       attachmentId,
@@ -384,6 +385,15 @@ export async function sendMessage(req, res) {
         success: false,
         error: 'to, forRecipient and forSender (each a sealed-box envelope) are all required',
       });
+    }
+    if (clientMessageId != null && !/^[a-zA-Z0-9_-]{8,100}$/.test(String(clientMessageId))) {
+      return res.status(400).json({ success: false, error: 'Invalid client message id' });
+    }
+    if (clientMessageId) {
+      const existing = await Message.findOne({ from: req.user._id, clientMessageId });
+      if (existing) {
+        return res.status(200).json({ success: true, data: toClientMessage(existing) });
+      }
     }
     const toOid = toObjectId(to);
     if (!toOid) {
@@ -450,6 +460,7 @@ export async function sendMessage(req, res) {
 
     const created = await Message.create({
       from: req.user._id,
+      clientMessageId: clientMessageId || undefined,
       to: toOid,
       forRecipient: normalizeEnvelope(forRecipient),
       forSender: normalizeEnvelope(forSender),

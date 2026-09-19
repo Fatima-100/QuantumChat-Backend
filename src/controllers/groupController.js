@@ -992,6 +992,7 @@ export async function sendGroupMessage(req, res) {
     const { groupId } = req.params;
     const {
       envelopes,
+      clientMessageId,
       content: contentRaw,
       attachmentId,
       replyTo,
@@ -1003,6 +1004,15 @@ export async function sendGroupMessage(req, res) {
     } = req.body;
     if (!mongoose.isValidObjectId(groupId)) {
       return res.status(400).json({ success: false, error: 'Invalid group id' });
+    }
+    if (clientMessageId != null && !/^[a-zA-Z0-9_-]{8,100}$/.test(String(clientMessageId))) {
+      return res.status(400).json({ success: false, error: 'Invalid client message id' });
+    }
+    if (clientMessageId) {
+      const existing = await Message.findOne({ from: req.user._id, clientMessageId });
+      if (existing) {
+        return res.status(200).json({ success: true, data: toClientMessage(existing) });
+      }
     }
 
     const group = await Group.findById(groupId);
@@ -1170,6 +1180,7 @@ export async function sendGroupMessage(req, res) {
 
     const created = await Message.create({
       from: req.user._id,
+      clientMessageId: clientMessageId || undefined,
       group: group._id,
       ...(isPublic ? { content } : { envelopes: normalized }),
       attachment: attachmentId || undefined,

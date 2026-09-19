@@ -61,6 +61,8 @@ const editHistoryEntrySchema = new mongoose.Schema(
 const messageSchema = new mongoose.Schema(
   {
     from: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    // Client-generated id used to make safe offline retries idempotent.
+    clientMessageId: { type: String, maxlength: 100, trim: true },
     to: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
     forRecipient: { type: envelopeSchema },
     forSender: { type: envelopeSchema },
@@ -132,6 +134,10 @@ const messageSchema = new mongoose.Schema(
 messageSchema.index({ from: 1, to: 1, createdAt: 1 });
 messageSchema.index({ group: 1, createdAt: 1 });
 messageSchema.index({ decoyFor: 1, from: 1, to: 1, createdAt: 1 });
+messageSchema.index(
+  { from: 1, clientMessageId: 1 },
+  { unique: true, partialFilterExpression: { clientMessageId: { $type: 'string' } } }
+);
 messageSchema.index({ 'aiMetadata.requestId': 1 }, { unique: true, sparse: true });
 messageSchema.index({ expiresAt: 1 }, { sparse: true });
 

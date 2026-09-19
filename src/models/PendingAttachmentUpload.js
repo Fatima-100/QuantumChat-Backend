@@ -11,6 +11,7 @@ const HEX_64 = /^[0-9a-f]{64}$/i;
  */
 const pendingAttachmentUploadSchema = new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  clientUploadId: { type: String, trim: true, maxlength: 100 },
   recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group' },
 
@@ -39,5 +40,10 @@ const pendingAttachmentUploadSchema = new mongoose.Schema({
 
   createdAt: { type: Date, default: Date.now, expires: 30 * 60 },
 });
+
+pendingAttachmentUploadSchema.index(
+  { owner: 1, clientUploadId: 1 },
+  { unique: true, partialFilterExpression: { clientUploadId: { $type: 'string' } } },
+);
 
 export default mongoose.model('PendingAttachmentUpload', pendingAttachmentUploadSchema, 'pendingattachmentuploads');
