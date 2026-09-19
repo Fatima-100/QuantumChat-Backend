@@ -208,6 +208,53 @@ export async function uploadPendingAttachmentBytes(req, res) {
   }
 }
 
+export async function uploadPendingAttachmentChunk(req, res) {
+  try {
+    const slot = req.query.slot === 'sender' ? 'sender' : 'recipient';
+    const chunkIndex = Number(req.query.chunkIndex);
+    const totalChunks = Number(req.query.totalChunks);
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !Number.isInteger(totalChunks) || totalChunks < 1 || chunkIndex >= totalChunks) {
+      return res.status(400).json({ success: false, error: 'Invalid chunk coordinates' });
+    }
+    const pending = await PendingAttachmentUpload.findById(req.params.id);
+    if (!pending || pending.owner.toString() !== req.user._id.toString()) {
+      return res.status(404).json({ success: false, error: 'Pending upload not found' });
+    }
+    if (!req.file?.buffer) return res.status(400).json({ success: false, error: 'Chunk file is required' });
+    const base = slot === 'sender' ? pending.senderObjectName : pending.recipientObjectName;
+    if (!base) return res.status(400).json({ success: false, error: `No ${slot} upload was requested` });
+
+    const current = slot === 'sender' ? (pending.senderChunks || []) : (pending.recipientChunks || []);
+    const existing = current.find((chunk) => chunk.index === chunkIndex);
+    if (!existing) {
+      const stored = await getStorage().put(req.file.buffer, `${base}.part-${chunkIndex}`, pending.mimetype, req.user._id);
+      current.push({ index: chunkIndex, key: stored.key });
+      current.sort((a, b) => a.index - b.index);
+      if (slot === 'sender') pending.senderChunks = current;
+      else pending.recipientChunks = current;
+      await pending.save();
+    }
+    res.json({ success: true, data: { chunkIndex, totalChunks } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+async function assembleChunkedSlot(pending, slot) {
+  const chunks = slot === 'sender' ? (pending.senderChunks || []) : (pending.recipientChunks || []);
+  const expected = chunks.length ? Math.max(...chunks.map((chunk) => chunk.index)) + 1 : 0;
+  if (!expected || chunks.length !== expected) {
+    const error = new Error(`${slot} upload is missing chunks`);
+    error.status = 400;
+    throw error;
+  }
+  const buffers = await Promise.all(chunks.sort((a, b) => a.index - b.index).map((chunk) => getStorage().read(chunk.key)));
+  const base = slot === 'sender' ? pending.senderObjectName : pending.recipientObjectName;
+  const stored = await getStorage().put(Buffer.concat(buffers), base, pending.mimetype, pending.owner);
+  await Promise.all(chunks.map((chunk) => deleteKey(chunk.key)));
+  return stored.key;
+}
+
 export async function finalizeAttachmentUpload(req, res) {
   const { pendingUploadId, clientUploadId, recipientDirectUploadId, senderDirectUploadId } = req.body;
   let pending;
@@ -245,14 +292,13 @@ export async function finalizeAttachmentUpload(req, res) {
       return proxyPath;
     };
 
-    const recipientStoragePath = resolveStoragePath(
-      pending.storageMode,
-      recipientDirectUploadId,
-      pending.recipientStoragePath,
-      'recipient'
-    );
+    const recipientStoragePath = pending.recipientChunks?.length
+      ? await assembleChunkedSlot(pending, 'recipient')
+      : resolveStoragePath(pending.storageMode, recipientDirectUploadId, pending.recipientStoragePath, 'recipient');
     const senderStoragePath = pending.senderObjectName
-      ? resolveStoragePath(pending.storageMode, senderDirectUploadId, pending.senderStoragePath, 'sender')
+      ? (pending.senderChunks?.length
+        ? await assembleChunkedSlot(pending, 'sender')
+        : resolveStoragePath(pending.storageMode, senderDirectUploadId, pending.senderStoragePath, 'sender'))
       : undefined;
 
     const storageProvider = getStorageProviderName();

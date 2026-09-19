@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   initAttachmentUpload,
   uploadPendingAttachmentBytes,
+  uploadPendingAttachmentChunk,
   finalizeAttachmentUpload,
   downloadAttachment,
 } from '../controllers/attachmentController.js';
@@ -19,6 +20,7 @@ router.use(requireAuthLean);
 // (create the Attachment record).
 router.post('/init', initAttachmentUpload);
 router.put('/pending/:id/bytes', upload.single('file'), uploadPendingAttachmentBytes);
+router.put('/pending/:id/chunk', upload.single('file'), uploadPendingAttachmentChunk);
 router.post('/finalize', finalizeAttachmentUpload);
 
 router.get('/:id/raw', downloadAttachment);

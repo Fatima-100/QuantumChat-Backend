@@ -20,6 +20,7 @@ const storyEnvelopeSchema = new mongoose.Schema(
 const storySchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    clientStoryId: { type: String, trim: true, maxlength: 100 },
     mediaType: { type: String, enum: ['image', 'video', 'audio'], required: true },
     filename: { type: String, required: true },
     mimetype: { type: String, required: true },
@@ -59,6 +60,10 @@ storySchema.statics.ttlMs = STORY_TTL_MS;
 storySchema.statics.maxDurationMs = MAX_DURATION_MS;
 storySchema.statics.minTtlMs = MIN_TTL_MS;
 storySchema.statics.maxTtlMs = MAX_TTL_MS;
+storySchema.index(
+  { user: 1, clientStoryId: 1 },
+  { unique: true, partialFilterExpression: { clientStoryId: { $type: 'string' } } },
+);
 
 storySchema.methods.toPublicJSON = function toPublicJSON() {
   return {

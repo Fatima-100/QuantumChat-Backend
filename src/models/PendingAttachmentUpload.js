@@ -26,6 +26,14 @@ const pendingAttachmentUploadSchema = new mongoose.Schema({
   // Populated once proxy-mode bytes have actually been written (local/dev only).
   recipientStoragePath: { type: String },
   senderStoragePath: { type: String },
+  recipientChunks: {
+    type: [{ index: { type: Number, min: 0 }, key: { type: String, required: true } }],
+    default: undefined,
+  },
+  senderChunks: {
+    type: [{ index: { type: Number, min: 0 }, key: { type: String, required: true } }],
+    default: undefined,
+  },
 
   // DM sealed-box fields
   nonce: { type: String },

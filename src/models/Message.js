@@ -112,7 +112,7 @@ const messageSchema = new mongoose.Schema(
       allowForward: { type: Boolean, default: true },
       forwardUntil: { type: Date, default: null },
     },
-   expiresAt: { type: Date, default: null, index: true },
+  expiresAt: { type: Date, default: null },
     // WhatsApp-style view-once media: photo / video / voice can be opened once,
     // then the ciphertext is purged and a tombstone remains.
     viewOnce: { type: Boolean, default: false },
