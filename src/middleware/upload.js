@@ -1,8 +1,8 @@
 import crypto from 'crypto';
+import express from 'express';
 import multer from 'multer';
 import path from 'path';
-import { getStorage, getStorageProviderName } from '../storage/index.js';
-
+import { getStorage, getStorageProviderName, readStoredObject, deleteStoredObject } from '../storage/index.js';
 /** Raster images only — SVG is rejected (scriptable when opened as a document). */
 export const SAFE_IMAGE_MIMES = new Set([
   'image/jpeg',
@@ -39,7 +39,19 @@ function rasterImageFilter(label) {
 // Memory staging only — durable blobs go to Cloudinary via getStorage().
 const memory = multer.memoryStorage();
 
-export const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+// 100MB total ceiling for a finished attachment. Large files never hit this
+// as a single request body — see chunkUpload below — this only caps the
+// assembled size once all chunks land.
+export const MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024;
+
+// One chunk of an in-progress large upload. Kept well under Vercel's
+// serverless request-body ceiling. Raw binary body, not multipart — the
+// filename/mimetype are already known from /attachments/init.
+export const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB per request
+export const chunkUpload = express.raw({
+  type: 'application/octet-stream',
+  limit: CHUNK_SIZE + 1024, // small slack for safety, not a second chunk
+});
 
 // Used for the attachment "proxy" upload path (see attachmentController.js
 // init/finalize) — bytes are staged in memory here, then handed to
@@ -71,7 +83,9 @@ export const wallpaperUpload = multer({
 
 export const storyUpload = multer({
   storage: memory,
-  limits: { fileSize: 40 * 1024 * 1024 },
+  // Phone videos are often large; client compresses first, but leave headroom
+  // for sealed ciphertext and short uncompressed clips.
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const type = String(file.mimetype || '').toLowerCase();
     const ext = path.extname(file.originalname || '').toLowerCase();
@@ -90,6 +104,33 @@ export const storyUpload = multer({
   },
 });
 
+export const highlightUpload = multer({
+  storage: memory,
+  limits: { fileSize: 40 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const type = String(file.mimetype || '').toLowerCase();
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    if (type === 'image/svg+xml' || ext === '.svg') {
+      return cb(new Error('SVG highlights are not allowed'));
+    }
+    if (
+      SAFE_IMAGE_MIMES.has(type) ||
+      type.startsWith('video/') ||
+      type.startsWith('audio/') ||
+      type === 'application/octet-stream'
+    ) {
+      return cb(null, true);
+    }
+    cb(new Error('Highlight must be an image, video, or audio file'));
+  },
+});
+
+export const highlightCoverUpload = multer({
+  storage: memory,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: rasterImageFilter('Highlight cover'),
+});
+
 /** Display / storage object name helper (not a filesystem path). */
 export function newObjectName(prefix = '', ext = '') {
   const safePrefix = String(prefix || '')
@@ -101,5 +142,5 @@ export function newObjectName(prefix = '', ext = '') {
   return safePrefix ? `${safePrefix}/${base}` : base;
 }
 
-export { getStorage, getStorageProviderName };
+export { getStorage, getStorageProviderName, readStoredObject, deleteStoredObject };
 

@@ -1,3 +1,6 @@
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import mongoose from 'mongoose';
 import Attachment from '../models/Attachment.js';
 import Group from '../models/Group.js';
@@ -5,6 +8,10 @@ import Message from '../models/Message.js';
 import PendingAttachmentUpload from '../models/PendingAttachmentUpload.js';
 import { getStorage, getStorageProviderName, newObjectName, MAX_ATTACHMENT_SIZE } from '../middleware/upload.js';
 import { areUsersBlocked } from './userController.js';
+
+function chunkTempPath(pendingId, slot) {
+  return path.join(os.tmpdir(), `qc-upload-${pendingId}-${slot}.part`);
+}
 
 const HEX_64 = /^[0-9a-f]{64}$/i;
 /** Storage keys are opaque alnum/-/_ strings; this just rejects garbage input. */
@@ -208,51 +215,109 @@ export async function uploadPendingAttachmentBytes(req, res) {
   }
 }
 
+/**
+ * One chunk of a large (video) upload. Chunks are appended in order to a
+ * scratch file in /tmp; once the last chunk lands, the assembled file is
+ * handed to getStorage().put() — the exact same call the small-file path
+ * (uploadPendingAttachmentBytes above) already uses. Same durable result
+ * either way; this just avoids ever putting a huge buffer in one request
+ * body, which Vercel's serverless functions reject.
+ */
 export async function uploadPendingAttachmentChunk(req, res) {
   try {
     const slot = req.query.slot === 'sender' ? 'sender' : 'recipient';
     const chunkIndex = Number(req.query.chunkIndex);
     const totalChunks = Number(req.query.totalChunks);
-    if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || !Number.isInteger(totalChunks) || totalChunks < 1 || chunkIndex >= totalChunks) {
-      return res.status(400).json({ success: false, error: 'Invalid chunk coordinates' });
+
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      return res.status(400).json({ success: false, error: 'Valid chunkIndex is required' });
     }
+    if (!Number.isInteger(totalChunks) || totalChunks < 1) {
+      return res.status(400).json({ success: false, error: 'Valid totalChunks is required' });
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ success: false, error: 'Chunk body is required' });
+    }
+
     const pending = await PendingAttachmentUpload.findById(req.params.id);
     if (!pending || pending.owner.toString() !== req.user._id.toString()) {
       return res.status(404).json({ success: false, error: 'Pending upload not found' });
     }
-    if (!req.file?.buffer) return res.status(400).json({ success: false, error: 'Chunk file is required' });
-    const base = slot === 'sender' ? pending.senderObjectName : pending.recipientObjectName;
-    if (!base) return res.status(400).json({ success: false, error: `No ${slot} upload was requested` });
-
-    const current = slot === 'sender' ? (pending.senderChunks || []) : (pending.recipientChunks || []);
-    const existing = current.find((chunk) => chunk.index === chunkIndex);
-    if (!existing) {
-      const stored = await getStorage().put(req.file.buffer, `${base}.part-${chunkIndex}`, pending.mimetype, req.user._id);
-      current.push({ index: chunkIndex, key: stored.key });
-      current.sort((a, b) => a.index - b.index);
-      if (slot === 'sender') pending.senderChunks = current;
-      else pending.recipientChunks = current;
-      await pending.save();
+    if (pending.storageMode !== 'proxy') {
+      return res.status(400).json({ success: false, error: 'This upload does not use the proxy path' });
     }
-    res.json({ success: true, data: { chunkIndex, totalChunks } });
+
+    const objectName = slot === 'sender' ? pending.senderObjectName : pending.recipientObjectName;
+    if (!objectName) {
+      return res.status(400).json({ success: false, error: `No ${slot} upload was requested for this session` });
+    }
+
+    const receivedField = slot === 'sender' ? 'senderChunksReceived' : 'recipientChunksReceived';
+    const totalField = slot === 'sender' ? 'senderTotalChunks' : 'recipientTotalChunks';
+    const tempPathField = slot === 'sender' ? 'senderTempPath' : 'recipientTempPath';
+    const storagePathField = slot === 'sender' ? 'senderStoragePath' : 'recipientStoragePath';
+
+    const tempPath = pending[tempPathField] || chunkTempPath(pending._id, slot);
+    await fs.appendFile(tempPath, req.body);
+
+    // Atomic compare-and-swap on THIS slot's counter only. The recipient
+    // and sender slots can now be written concurrently (Chat.jsx uploads
+    // both at once), and a plain pending.save() relies on Mongoose's
+    // shared __v version counter — two concurrent saves on the same
+    // document (even touching different fields) can collide and drop an
+    // update. findOneAndUpdate here touches only this slot's fields and
+    // doesn't depend on __v at all, so the two slots can never step on
+    // each other.
+    const updated = await PendingAttachmentUpload.findOneAndUpdate(
+      { _id: pending._id, [receivedField]: chunkIndex },
+      {
+        $set: {
+          [receivedField]: chunkIndex + 1,
+          [totalField]: totalChunks,
+          [tempPathField]: tempPath,
+        },
+      },
+      { new: true },
+    );
+
+    if (!updated) {
+      // No document matched our expected chunkIndex for this slot — a
+      // retry raced ahead, or this chunk arrived twice. Report where the
+      // slot actually is so the client can resume correctly.
+      const current = await PendingAttachmentUpload.findById(pending._id);
+      return res.status(409).json({
+        success: false,
+        error: 'Chunk out of order',
+        data: { expectedIndex: current?.[receivedField] ?? 0 },
+      });
+    }
+
+    const isComplete = updated[receivedField] >= totalChunks;
+    if (!isComplete) {
+      return res.json({
+        success: true,
+        data: { complete: false, chunksReceived: updated[receivedField], totalChunks },
+      });
+    }
+
+    const assembled = await fs.readFile(tempPath);
+    if (assembled.length > MAX_ATTACHMENT_SIZE) {
+      await fs.unlink(tempPath).catch(() => {});
+      return res.status(400).json({ success: false, error: 'File too large' });
+    }
+
+    const stored = await getStorage().put(assembled, objectName, updated.mimetype, req.user._id);
+    await fs.unlink(tempPath).catch(() => {});
+
+    await PendingAttachmentUpload.findByIdAndUpdate(pending._id, {
+      $set: { [storagePathField]: stored.key },
+      $unset: { [tempPathField]: 1 },
+    });
+
+    res.json({ success: true, data: { complete: true } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
-}
-
-async function assembleChunkedSlot(pending, slot) {
-  const chunks = slot === 'sender' ? (pending.senderChunks || []) : (pending.recipientChunks || []);
-  const expected = chunks.length ? Math.max(...chunks.map((chunk) => chunk.index)) + 1 : 0;
-  if (!expected || chunks.length !== expected) {
-    const error = new Error(`${slot} upload is missing chunks`);
-    error.status = 400;
-    throw error;
-  }
-  const buffers = await Promise.all(chunks.sort((a, b) => a.index - b.index).map((chunk) => getStorage().read(chunk.key)));
-  const base = slot === 'sender' ? pending.senderObjectName : pending.recipientObjectName;
-  const stored = await getStorage().put(Buffer.concat(buffers), base, pending.mimetype, pending.owner);
-  await Promise.all(chunks.map((chunk) => deleteKey(chunk.key)));
-  return stored.key;
 }
 
 export async function finalizeAttachmentUpload(req, res) {
@@ -292,13 +357,14 @@ export async function finalizeAttachmentUpload(req, res) {
       return proxyPath;
     };
 
-    const recipientStoragePath = pending.recipientChunks?.length
-      ? await assembleChunkedSlot(pending, 'recipient')
-      : resolveStoragePath(pending.storageMode, recipientDirectUploadId, pending.recipientStoragePath, 'recipient');
+    const recipientStoragePath = resolveStoragePath(
+      pending.storageMode,
+      recipientDirectUploadId,
+      pending.recipientStoragePath,
+      'recipient'
+    );
     const senderStoragePath = pending.senderObjectName
-      ? (pending.senderChunks?.length
-        ? await assembleChunkedSlot(pending, 'sender')
-        : resolveStoragePath(pending.storageMode, senderDirectUploadId, pending.senderStoragePath, 'sender'))
+      ? resolveStoragePath(pending.storageMode, senderDirectUploadId, pending.senderStoragePath, 'sender')
       : undefined;
 
     const storageProvider = getStorageProviderName();

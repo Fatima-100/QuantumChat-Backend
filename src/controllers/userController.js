@@ -6,6 +6,7 @@ import Message from '../models/Message.js';
 import User, { KEY_SET_SIZE } from '../models/User.js';
 import { generateTransliteratedNames } from '../services/transliterationService.js';
 import { conversationKey } from '../utils/conversationKey.js';
+import { appBaseUrl } from '../utils/mail.js';
 import { normalizeNotificationSettings } from '../utils/notificationSettings.js';
 import { isEmailLike, normalizePhone, phoneLookupVariants } from '../utils/phone.js';
 import { toObjectId } from '../utils/toObjectId.js';
@@ -114,7 +115,7 @@ export async function getUser(req, res) {
 
 export async function updatePrivacy(req, res) {
   try {
-    const {
+     const {
       lastSeen,
       readReceipts,
       onlineStatus,
@@ -132,6 +133,7 @@ export async function updatePrivacy(req, res) {
       whoCanCreateGroupsWithMe,
       groupMentions,
       screenshotProtection,
+      viewStoriesAnonymously,
     } = req.body || {};
 
     if (lastSeen !== undefined && !['everyone', 'friends', 'nobody'].includes(lastSeen)) {
@@ -149,6 +151,9 @@ export async function updatePrivacy(req, res) {
     }
     if (screenshotProtection !== undefined && typeof screenshotProtection !== 'boolean') {
       return res.status(400).json({ success: false, error: 'Invalid screenshotProtection privacy setting' });
+    }
+    if (viewStoriesAnonymously !== undefined && typeof viewStoriesAnonymously !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'Invalid viewStoriesAnonymously privacy setting' });
     }
     if (onlineStatus !== undefined && !['everyone', 'friends', 'selected'].includes(onlineStatus)) {
       return res.status(400).json({ success: false, error: 'Invalid onlineStatus privacy setting' });
@@ -380,6 +385,10 @@ function applyPrivacyPatch(user, privacy) {
 
   if (typeof privacy.screenshotProtection === 'boolean') {
     user.privacy.screenshotProtection = privacy.screenshotProtection;
+  }
+
+  if (typeof privacy.viewStoriesAnonymously === 'boolean') {
+    user.privacy.viewStoriesAnonymously = privacy.viewStoriesAnonymously;
   }
 
   if (onlineStatusOk.includes(privacy.onlineStatus)) {
@@ -716,6 +725,76 @@ export async function clearConversation(req, res) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
+
+/**
+ * Undo a recent "clear chat" by restoring the previous watermark entries for
+ * this conversation. The client sends the snapshot taken right before clear.
+ * Empty restoreEntries means "no clear watermark for this chat" (full undo).
+ */
+export async function undoClearConversation(req, res) {
+  try {
+    const { peerId, groupId, restoreEntries: restoreRaw } = req.body || {};
+    if (!peerId && !groupId) {
+      return res.status(400).json({ success: false, error: 'peerId or groupId is required' });
+    }
+    if (peerId && groupId) {
+      return res.status(400).json({ success: false, error: 'Provide either peerId or groupId, not both' });
+    }
+
+    if (groupId) {
+      const gid = toObjectId(groupId);
+      if (!gid) return res.status(400).json({ success: false, error: 'Invalid group id' });
+      const group = await Group.findById(gid).select('members');
+      if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+      if (!group.isMember(req.user._id)) {
+        return res.status(403).json({ success: false, error: 'Not a group member' });
+      }
+    } else {
+      const pid = toObjectId(peerId);
+      if (!pid) return res.status(400).json({ success: false, error: 'Invalid user id' });
+    }
+
+    const key = conversationKey(
+      groupId ? { group: groupId } : { from: req.user._id, to: peerId }
+    );
+
+    const restoreEntries = Array.isArray(restoreRaw) ? restoreRaw : [];
+    const normalized = [];
+    for (const entry of restoreEntries) {
+      if (!entry || typeof entry !== 'object') continue;
+      // Only accept entries for this conversation — never let a client
+      // rewrite watermarks for unrelated chats.
+      if (String(entry.conversationKey || '') !== key) continue;
+      const scope = String(entry.scope || 'all');
+      if (!CLEAR_SCOPES.includes(scope)) continue;
+      const clearedAt = entry.clearedAt ? new Date(entry.clearedAt) : null;
+      if (!clearedAt || Number.isNaN(clearedAt.getTime())) continue;
+      normalized.push({ conversationKey: key, scope, clearedAt });
+    }
+
+    const user = req.user;
+    const already = user.clearedConversations || [];
+    user.clearedConversations = [
+      ...already.filter((c) => c.conversationKey !== key),
+      ...normalized,
+    ];
+    await user.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(String(user._id)).emit('chat:clear-undone', {
+        conversationKey: key,
+        peerId: peerId ? String(peerId) : null,
+        groupId: groupId ? String(groupId) : null,
+      });
+    }
+
+    res.json({ success: true, data: user.toSelfJSON() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 export async function listBlockedUsers(req, res) {
   try {
     const me = await User.findById(req.user._id).populate('blockedUsers', 'username displayName avatarPath');
@@ -1335,6 +1414,33 @@ export async function updateLanguage(req, res) {
     req.user.preferredLanguage = lang;
     await req.user.save();
     res.json({ success: true, data: req.user.toSelfJSON() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** My invite link plus the list of people who joined using it. */
+export async function getMyReferrals(req, res) {
+  try {
+    const referredUsers = await User.find({ referredBy: req.user._id })
+      .select('username displayName avatarPath createdAt')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: {
+        referralCode: req.user.referralCode,
+        referralLink: `${appBaseUrl()}/register?ref=${req.user.referralCode}`,
+        invitedCount: referredUsers.length,
+        invitedUsers: referredUsers.map((u) => ({
+          id: u._id,
+          username: u.username,
+          displayName: u.displayName || '',
+          hasAvatar: Boolean(u.avatarPath),
+          joinedAt: u.createdAt,
+        })),
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

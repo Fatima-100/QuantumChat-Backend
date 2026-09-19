@@ -115,7 +115,17 @@ function attachmentCategory(attachment) {
 function scopeCreatedAtCondition(scope, clearedAt) {
   const base = { createdAt: { $lte: clearedAt } };
   if (scope === 'all') return base;
-  if (scope === 'text') return { ...base, mediaCategory: { $exists: false } };
+  if (scope === 'text') {
+    // Plain text only — must not treat legacy media (no mediaCategory field)
+    // as text, or a "Text messages" clear would wipe the whole chat.
+    return {
+      ...base,
+      $and: [
+        { $or: [{ attachment: { $exists: false } }, { attachment: null }] },
+        { $or: [{ mediaCategory: { $exists: false } }, { mediaCategory: null }] },
+      ],
+    };
+  }
   return { ...base, mediaCategory: scope };
 }
 function toClientMessage(doc) {
@@ -1058,6 +1068,36 @@ export async function reactToMessage(req, res) {
       for (const memberId of groupMemberIds) io?.to(memberId).emit('message:reaction', payload);
     } else {
       emitToParticipants(io, message, 'message:reaction', payload);
+    }
+
+     if (!clear) {
+      const reactorId = req.user._id.toString();
+      if (groupMemberIds) {
+        for (const memberId of groupMemberIds) {
+          if (memberId === reactorId) continue;
+          notifyUser(memberId, {
+            title: 'QuantumChat',
+            body: 'New reaction',
+            kind: 'reaction',
+            conversationKey: `group:${message.group}`,
+            url: `/chat/g/${message.group}`,
+            data: { messageId: message._id.toString(), fromUserId: reactorId },
+          }).catch(() => {});
+        }
+      } else {
+        const otherPartyId =
+          message.from.toString() === reactorId ? message.to?.toString() : message.from.toString();
+        if (otherPartyId && otherPartyId !== reactorId) {
+          notifyUser(otherPartyId, {
+            title: 'QuantumChat',
+            body: 'New reaction',
+            kind: 'reaction',
+            conversationKey: conversationKey({ from: message.from, to: message.to }),
+            url: `/chat/${reactorId}`,
+            data: { messageId: message._id.toString(), fromUserId: reactorId },
+          }).catch(() => {});
+        }
+      }
     }
 
     res.json({ success: true, data: payload });

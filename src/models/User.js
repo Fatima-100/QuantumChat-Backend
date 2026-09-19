@@ -17,7 +17,7 @@ const privacySchema = new mongoose.Schema(
     online: { type: String, enum: ['everyone', 'nobody'], default: 'everyone' },
     onlineStatus: {
       type: String,
-      enum: ['everyone', 'friends', 'selected'],
+      enum: ['everyone', 'friends', 'selected', 'no one '],
       default: 'everyone',
     },
     onlineStatusVisibleTo: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
@@ -81,6 +81,13 @@ const privacySchema = new mongoose.Schema(
      * chats and profile on their device (strongest on mobile).
      */
     screenshotProtection: { type: Boolean, default: false },
+    /**
+     * When true: (a) this user's story views are recorded anonymously to
+     * everyone else, and (b) as the reciprocal trade-off, this user can no
+     * longer see who viewed their OWN stories — enforced server-side in
+     * storyController.getStoryViewers, never just hidden client-side.
+     */
+    viewStoriesAnonymously: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -409,9 +416,33 @@ friends: [
       type: String,
       default: null,
     },
+    // Personal invite link, auto-generated on first save. Used for
+    // "invite a friend" referral tracking — never exposed on other users'
+    // public profiles, only to the account holder (toSelfJSON) and via the
+    // dedicated public preview endpoint by code.
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+    // Set once at signup if a valid referralCode was used. Null for anyone
+    // who joined without one, or whose referrer's code was invalid/expired.
+    referredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
   },
   { timestamps: true }
 );
+
+userSchema.pre('save', function generateReferralCode(next) {
+  if (!this.referralCode) {
+    this.referralCode = crypto.randomBytes(4).toString('hex');
+  }
+  next();
+});
 userSchema.pre('save', async function hashPassword(next) {
   if (!this.isModified('password')) return next();
   if (!this.password) return next();
@@ -569,6 +600,7 @@ userSchema.methods.toPublicJSON = function toPublicJSON(viewerId) {
       whoCanCreateGroupsWithMe: privacy.whoCanCreateGroupsWithMe || 'everyone',
       groupMentions: privacy.groupMentions || 'everyone',
       screenshotProtection: privacy.screenshotProtection === true,
+      viewStoriesAnonymously: privacy.viewStoriesAnonymously === true,
     },
     isSystemUser: Boolean(this.isSystemUser),
     systemRole: this.systemRole || null,
@@ -613,6 +645,7 @@ userSchema.methods.toSelfJSON = function toSelfJSON() {
       scope: c.scope || 'all',
     })) : [],
     totpEnabled: Boolean(this.totpEnabled),
+    referralCode: this.referralCode || null,
   };
 };
 
