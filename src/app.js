@@ -128,10 +128,10 @@ app.use('/api/activity', activityRoutes);
     });
 
         app.get('/api/cron/time-capsules', async (req, res) => {
-      const provided = req.headers['x-cron-secret'] || req.query.secret;
-      if (!process.env.CRON_SECRET || provided !== process.env.CRON_SECRET) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
+  const provided = req.headers['x-cron-secret'];
+  if (!process.env.CRON_SECRET || provided !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
       try {
         const io = req.app.get('io');
         const deliveredCount = await runTimeCapsuleDelivery(io);
