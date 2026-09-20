@@ -118,8 +118,12 @@ function parseEnvelopes(raw) {
 
 export async function createStory(req, res) {
   try {
-    const clientStoryId = typeof req.body.clientStoryId === 'string' ? req.body.clientStoryId.trim() : '';
-    if (clientStoryId && !/^[a-zA-Z0-9_-]{8,100}$/.test(clientStoryId)) {
+    const rawClientStoryId = req.body.clientStoryId;
+    const clientStoryId =
+      typeof rawClientStoryId === 'string' && /^[a-zA-Z0-9_-]{8,100}$/.test(rawClientStoryId.trim())
+        ? rawClientStoryId.trim()
+        : null;
+    if (rawClientStoryId != null && !clientStoryId) {
       return res.status(400).json({ success: false, error: 'Invalid client story id' });
     }
     if (clientStoryId) {

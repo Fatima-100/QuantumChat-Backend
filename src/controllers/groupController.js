@@ -1012,20 +1012,25 @@ export async function sendGroupMessage(req, res) {
       forwardPolicy: forwardPolicyRaw,
       viewOnce: viewOnceRaw,
     } = req.body;
-    if (!mongoose.isValidObjectId(groupId)) {
+    const cleanGroupId = typeof groupId === 'string' && mongoose.isValidObjectId(groupId) ? groupId : null;
+    if (!cleanGroupId) {
       return res.status(400).json({ success: false, error: 'Invalid group id' });
     }
-    if (clientMessageId != null && !/^[a-zA-Z0-9_-]{8,100}$/.test(String(clientMessageId))) {
+    const cleanClientMessageId =
+      typeof clientMessageId === 'string' && /^[a-zA-Z0-9_-]{8,100}$/.test(clientMessageId.trim())
+        ? clientMessageId.trim()
+        : null;
+    if (clientMessageId != null && !cleanClientMessageId) {
       return res.status(400).json({ success: false, error: 'Invalid client message id' });
     }
-    if (clientMessageId) {
-      const existing = await Message.findOne({ from: req.user._id, clientMessageId });
+    if (cleanClientMessageId) {
+      const existing = await Message.findOne({ from: req.user._id, clientMessageId: cleanClientMessageId });
       if (existing) {
         return res.status(200).json({ success: true, data: toClientMessage(existing) });
       }
     }
 
-    const group = await Group.findById(groupId);
+    const group = await Group.findById(cleanGroupId);
     if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
     if (!group.isMember(req.user._id)) {
       return res.status(403).json({ success: false, error: 'Not a group member' });
